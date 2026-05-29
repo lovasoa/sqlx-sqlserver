@@ -9,7 +9,7 @@ use sqlx_core::executor::{Execute, Executor};
 use sqlx_core::transaction::Transaction;
 use sqlx_core::value::Value;
 use sqlx_core::Either;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_native_tls::TlsConnector;
 
@@ -430,12 +430,10 @@ impl MssqlWireStream {
     async fn write_all(&mut self, bytes: &[u8]) -> Result<(), Error> {
         match &mut self.stream {
             MssqlStream::Raw(stream) => {
-                stream.write_all(bytes).await?;
-                stream.flush().await?;
+                write_tds_packets(stream, bytes).await?;
             }
             MssqlStream::Tls(stream) => {
-                stream.write_all(bytes).await?;
-                stream.flush().await?;
+                write_tds_packets(stream, bytes).await?;
             }
             MssqlStream::Taken => return Err(taken_stream_error()),
         }
@@ -470,7 +468,21 @@ impl MssqlWireStream {
         let mut stream = connector
             .connect(domain, stream)
             .await
-            .map_err(|error| Error::Tls(error.into()))?;
+            .map_err(|error| {
+                Error::Tls(
+                    std::io::Error::other(format!(
+                        "SQL Server TLS handshake failed for host `{}` during the TDS PRELOGIN encryption upgrade \
+                         (encrypt={:?}, trust_server_certificate={}, hostname_in_certificate={}, ssl_root_cert={}): {}",
+                        domain,
+                        options.encrypt(),
+                        options.trust_server_certificate(),
+                        options.hostname_in_certificate().unwrap_or("<not set>"),
+                        options.ssl_root_cert().is_some(),
+                        error
+                    ))
+                    .into(),
+                )
+            })?;
         stream.get_mut().get_mut().get_mut().finish_handshake();
 
         self.stream = MssqlStream::Tls(stream);
@@ -547,6 +559,40 @@ impl MssqlWireStream {
 
         Ok(())
     }
+}
+
+async fn write_tds_packets<S>(stream: &mut S, bytes: &[u8]) -> Result<(), Error>
+where
+    S: AsyncWrite + Unpin,
+{
+    let mut offset = 0usize;
+
+    while offset < bytes.len() {
+        let packet = tds_packet_slice(bytes, offset)?;
+        stream.write_all(packet).await?;
+        stream.flush().await?;
+        offset += packet.len();
+    }
+
+    Ok(())
+}
+
+fn tds_packet_slice(bytes: &[u8], offset: usize) -> Result<&[u8], Error> {
+    let header_end = offset
+        .checked_add(PACKET_HEADER_LEN)
+        .ok_or_else(|| Error::Protocol("SQL Server outbound packet offset overflow".to_owned()))?;
+    let header_bytes = bytes.get(offset..header_end).ok_or_else(|| {
+        Error::Protocol("SQL Server outbound packet buffer ended inside a header".to_owned())
+    })?;
+    let header = PacketHeader::decode(header_bytes).map_err(packet_error)?;
+    let packet_len = usize::from(header.length);
+    let packet_end = offset
+        .checked_add(packet_len)
+        .ok_or_else(|| Error::Protocol("SQL Server outbound packet length overflow".to_owned()))?;
+
+    bytes.get(offset..packet_end).ok_or_else(|| {
+        Error::Protocol("SQL Server outbound packet buffer ended inside a packet".to_owned())
+    })
 }
 
 #[derive(Debug)]
@@ -650,5 +696,27 @@ mod tests {
     fn rejects_login_only_tls_fallback_until_downgrade_is_available() {
         assert!(negotiate_encryption(Encrypt::Off, Encrypt::On).is_err());
         assert!(negotiate_encryption(Encrypt::On, Encrypt::Off).is_err());
+    }
+
+    #[test]
+    fn slices_encoded_outbound_packets_by_header_length() {
+        let bytes = crate::protocol::packet::encode_message(PacketType::RPC, &[0; 11], 12).unwrap();
+
+        let first = tds_packet_slice(&bytes, 0).unwrap();
+        assert_eq!(12, first.len());
+
+        let second = tds_packet_slice(&bytes, first.len()).unwrap();
+        assert_eq!(12, second.len());
+
+        let third = tds_packet_slice(&bytes, first.len() + second.len()).unwrap();
+        assert_eq!(11, third.len());
+    }
+
+    #[test]
+    fn rejects_truncated_outbound_packet() {
+        let bytes = crate::protocol::packet::encode_message(PacketType::RPC, &[0; 11], 12).unwrap();
+        let err = tds_packet_slice(&bytes[..bytes.len() - 1], 24).unwrap_err();
+
+        assert!(err.to_string().contains("ended inside a packet"));
     }
 }

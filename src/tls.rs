@@ -72,7 +72,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsPreloginStream<S> {
 
                 let read = header_read.filled().len();
                 if read == 0 {
-                    return Poll::Ready(Ok(()));
+                    let message = if self.header_pos == 0 {
+                        "SQL Server closed the connection before sending a TDS PRELOGIN packet during TLS handshake"
+                    } else {
+                        "SQL Server closed the connection in the middle of a TDS PRELOGIN packet header during TLS handshake"
+                    };
+                    return Poll::Ready(Err(io::Error::new(io::ErrorKind::UnexpectedEof, message)));
                 }
 
                 let header_pos = self.header_pos;
@@ -105,6 +110,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsPreloginStream<S> {
         ready!(Pin::new(&mut self.stream).poll_read(cx, &mut limited_buf))?;
 
         let read = limited_buf.filled().len();
+        if read == 0 && self.read_remaining > 0 {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "SQL Server closed the connection in the middle of a TDS PRELOGIN TLS payload",
+            )));
+        }
+
         buf.advance(read);
         self.read_remaining -= read;
 
@@ -168,7 +180,10 @@ fn packet_header_io_error(error: PacketHeaderError) -> io::Error {
 }
 
 fn packet_frame_error(error: PacketFrameError) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, error)
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("failed to wrap TLS handshake bytes in a TDS PRELOGIN packet: {error}"),
+    )
 }
 
 #[cfg(test)]

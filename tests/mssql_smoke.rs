@@ -150,8 +150,8 @@ async fn fetches_bound_large_text_and_binary_when_configured(
         .fetch_one(&mut conn)
         .await?;
 
-    assert_eq!(4001_i32, row.try_get::<i32, _>(0)?);
-    assert_eq!(8002_i32, row.try_get::<i32, _>(1)?);
+    assert_eq!(4001_i64, row.try_get::<i64, _>(0)?);
+    assert_eq!(8002_i64, row.try_get::<i64, _>(1)?);
 
     let bytes = vec![0x5a; 8001];
     let row = sqlx_core::query::query("SELECT DATALENGTH(@p1)")
@@ -159,7 +159,7 @@ async fn fetches_bound_large_text_and_binary_when_configured(
         .fetch_one(&mut conn)
         .await?;
 
-    assert_eq!(8001_i32, row.try_get::<i32, _>(0)?);
+    assert_eq!(8001_i64, row.try_get::<i64, _>(0)?);
 
     conn.close().await?;
     Ok(())

@@ -8,9 +8,21 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 cargo test --locked --features integration-tests --test mssql_smoke --no-run
 
 deadline=$((SECONDS + 120))
-until cargo test --locked --features integration-tests --test mssql_smoke \
-    connects_and_pings_when_configured -- --exact
+while true
 do
+    output="$(cargo test --locked --features integration-tests --test mssql_smoke \
+        connects_and_pings_when_configured -- --exact 2>&1)" && {
+        printf '%s\n' "$output"
+        break
+    }
+
+    printf '%s\n' "$output"
+
+    if ! grep -Eiq 'connection refused|connection reset|timed out|early eof|unexpected eof' <<<"$output"; then
+        echo "SQL Server readiness check failed with a non-transient error" >&2
+        exit 1
+    fi
+
     if ((SECONDS >= deadline)); then
         echo "SQL Server did not become ready before the timeout" >&2
         exit 1
