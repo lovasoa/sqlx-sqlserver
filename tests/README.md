@@ -8,7 +8,7 @@ membership or `path =` dependencies.
 Run the tests that do not require SQL Server:
 
 ```sh
-cargo test
+./scripts/ci.sh
 ```
 
 While the port is incomplete, add coverage here first for URL parsing, SSRP/TDS
@@ -21,7 +21,7 @@ tests print a skip message and pass.
 
 ```sh
 MSSQL_DATABASE_URL='mssql://sa:Password123!@localhost:1433/master?encrypt=mandatory&trust_server_certificate=true' \
-cargo test --features integration-tests --test mssql_smoke
+./scripts/test-mssql.sh
 ```
 
 Encrypted connections use the SQL Server PRELOGIN-wrapped TLS handshake. Use
