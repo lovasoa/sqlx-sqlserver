@@ -5,6 +5,9 @@ use sqlx_core::error::BoxDynError;
 
 use crate::Mssql;
 
+const PLP_NULL: u64 = 0xffff_ffff_ffff_ffff;
+const PLP_CHUNK_SIZE: usize = 8192;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct CollationFlags(u8);
 
@@ -529,21 +532,19 @@ impl TypeInfo {
         out: &mut Vec<u8>,
         value: T,
     ) -> Result<(), BoxDynError> {
-        // Multiple chunks are not supported yet.
-        let start_of_value = out.len();
-        out.extend_from_slice(&0_u64.to_le_bytes());
-        let start_of_chunk = out.len();
-        out.extend_from_slice(&0_u32.to_le_bytes());
-        let start_of_bytes = out.len();
+        let mut value_buf = Vec::new();
+        if let IsNull::Yes = value.encode(&mut value_buf)? {
+            out.extend_from_slice(&PLP_NULL.to_le_bytes());
+            return Ok(());
+        }
 
-        let size = if let IsNull::Yes = value.encode(out)? {
-            unreachable!("put_big_blob should never be called with NULL value");
-        } else {
-            u32::try_from(out.len() - start_of_bytes).expect("blobs >4GB not supported")
-        };
+        out.extend_from_slice(&u64::try_from(value_buf.len())?.to_le_bytes());
 
-        out[start_of_value..(start_of_value + 4)].copy_from_slice(&size.to_le_bytes());
-        out[start_of_chunk..(start_of_chunk + 4)].copy_from_slice(&size.to_le_bytes());
+        for chunk in value_buf.chunks(PLP_CHUNK_SIZE) {
+            out.extend_from_slice(&u32::try_from(chunk.len())?.to_le_bytes());
+            out.extend_from_slice(chunk);
+        }
+
         out.extend_from_slice(&0_u32.to_le_bytes());
         Ok(())
     }
@@ -943,6 +944,55 @@ mod tests {
             Some(vec![b'h', 0, b'i', 0]),
             type_info.get_value(&mut input).unwrap()
         );
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn put_value_chunks_large_max_nvarchar_blob() {
+        let type_info = TypeInfo::new(DataType::NVarChar, 0xffff);
+        let value = "x".repeat(PLP_CHUNK_SIZE + 1);
+        let expected_len = value.encode_utf16().count() * 2;
+        let mut out = Vec::new();
+
+        type_info.put_value(&mut out, value.as_str()).unwrap();
+
+        let mut input = out.as_slice();
+        assert_eq!(expected_len as u64, read_u64_le(&mut input).unwrap());
+        let mut chunk_sizes = Vec::new();
+        loop {
+            let chunk_size = read_u32_le(&mut input).unwrap() as usize;
+            if chunk_size == 0 {
+                break;
+            }
+
+            chunk_sizes.push(chunk_size);
+            let _ = take(&mut input, chunk_size).unwrap();
+        }
+
+        assert_eq!(vec![PLP_CHUNK_SIZE, PLP_CHUNK_SIZE, 2], chunk_sizes);
+        assert!(input.is_empty());
+
+        let mut input = out.as_slice();
+        assert_eq!(
+            expected_len,
+            type_info.get_value(&mut input).unwrap().unwrap().len()
+        );
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn put_value_encodes_null_max_nvarchar_blob() {
+        let type_info = TypeInfo::new(DataType::NVarChar, 0xffff);
+        let mut out = Vec::new();
+
+        type_info
+            .put_value(&mut out, Option::<String>::None)
+            .unwrap();
+
+        assert_eq!(PLP_NULL.to_le_bytes(), out.as_slice());
+
+        let mut input = out.as_slice();
+        assert_eq!(None, type_info.get_value(&mut input).unwrap());
         assert!(input.is_empty());
     }
 
