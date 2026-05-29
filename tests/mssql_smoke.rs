@@ -10,10 +10,14 @@ use sqlx_core::connection::{ConnectOptions, Connection};
 use sqlx_core::executor::Executor;
 #[cfg(feature = "integration-tests")]
 use sqlx_core::row::Row;
+#[cfg(all(feature = "integration-tests", feature = "migrate"))]
+use sqlx_core::sql_str::SqlSafeStr;
 #[cfg(feature = "integration-tests")]
 use sqlx_core::statement::Statement;
 #[cfg(feature = "integration-tests")]
 use sqlx_core::value::ValueRef;
+#[cfg(all(feature = "integration-tests", feature = "migrate"))]
+use std::borrow::Cow;
 
 fn database_url() -> Option<String> {
     std::env::var("MSSQL_DATABASE_URL")
@@ -43,6 +47,13 @@ async fn any_test_conn(
     Ok(Some(sqlx_core::any::AnyConnection::connect(&url).await?))
 }
 
+#[cfg(all(feature = "integration-tests", feature = "migrate"))]
+async fn any_migrate_test_conn(
+    test_name: &str,
+) -> Result<Option<sqlx_core::any::AnyConnection>, Box<dyn std::error::Error>> {
+    any_test_conn(test_name).await
+}
+
 #[cfg(feature = "integration-tests")]
 async fn native_test_conn(
     test_name: &str,
@@ -65,6 +76,14 @@ fn mssql_database_url_is_parseable_when_set() {
 
     url.parse::<MssqlConnectOptions>()
         .expect("MSSQL_DATABASE_URL should parse as SQL Server options");
+}
+
+#[cfg(feature = "migrate")]
+#[test]
+fn any_driver_exposes_migrate_database_when_feature_enabled() {
+    sqlx_sqlserver::any::DRIVER
+        .get_migrate_database()
+        .expect("SQL Server Any driver should expose migration database hooks");
 }
 
 #[cfg(feature = "integration-tests")]
@@ -218,5 +237,119 @@ async fn any_fetches_select_one_when_configured() -> Result<(), Box<dyn std::err
     assert_eq!(1_i32, row.try_get::<i32, _>(0)?);
 
     conn.close().await?;
+    Ok(())
+}
+
+#[cfg(all(feature = "integration-tests", feature = "migrate"))]
+#[tokio::test]
+async fn runs_migration_when_configured() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = native_test_conn("SQL Server migration test").await? else {
+        return Ok(());
+    };
+
+    let table_name = "_sqlx_migrations_smoke";
+    let _ = conn
+        .execute(sqlx_core::sql_str::AssertSqlSafe(format!(
+            "DROP TABLE IF EXISTS {table_name}_table"
+        )))
+        .await?;
+    let _ = conn
+        .execute(sqlx_core::sql_str::AssertSqlSafe(format!(
+            "DROP TABLE IF EXISTS {table_name}"
+        )))
+        .await?;
+
+    let migration = sqlx_core::migrate::Migration::new(
+        1,
+        Cow::Borrowed("create smoke table"),
+        sqlx_core::migrate::MigrationType::Simple,
+        sqlx_core::sql_str::AssertSqlSafe(format!(
+            "CREATE TABLE {table_name}_table (id INT NOT NULL)"
+        ))
+        .into_sql_str(),
+        false,
+    );
+    let mut migrator = sqlx_core::migrate::Migrator::with_migrations(vec![migration]);
+    migrator.dangerous_set_table_name(table_name.to_owned());
+
+    migrator.run_direct(None, &mut conn, false).await?;
+
+    let exists: bool = sqlx_core::query_scalar::query_scalar(
+        "SELECT CONVERT(bit, CASE WHEN OBJECT_ID(N'_sqlx_migrations_smoke_table', N'U') IS NULL THEN 0 ELSE 1 END)",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+
+    assert!(exists);
+
+    let _ = conn
+        .execute(sqlx_core::sql_str::AssertSqlSafe(format!(
+            "DROP TABLE IF EXISTS {table_name}_table"
+        )))
+        .await?;
+    let _ = conn
+        .execute(sqlx_core::sql_str::AssertSqlSafe(format!(
+            "DROP TABLE IF EXISTS {table_name}"
+        )))
+        .await?;
+    conn.close().await?;
+
+    Ok(())
+}
+
+#[cfg(all(feature = "integration-tests", feature = "migrate"))]
+#[tokio::test]
+async fn any_runs_migration_when_configured() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = any_migrate_test_conn("SQL Server Any migration test").await? else {
+        return Ok(());
+    };
+
+    let table_name = "_sqlx_any_migrations_smoke";
+    let _ = conn
+        .execute(sqlx_core::sql_str::AssertSqlSafe(format!(
+            "DROP TABLE IF EXISTS {table_name}_table"
+        )))
+        .await?;
+    let _ = conn
+        .execute(sqlx_core::sql_str::AssertSqlSafe(format!(
+            "DROP TABLE IF EXISTS {table_name}"
+        )))
+        .await?;
+
+    let migration = sqlx_core::migrate::Migration::new(
+        1,
+        Cow::Borrowed("create any smoke table"),
+        sqlx_core::migrate::MigrationType::Simple,
+        sqlx_core::sql_str::AssertSqlSafe(format!(
+            "CREATE TABLE {table_name}_table (id INT NOT NULL)"
+        ))
+        .into_sql_str(),
+        false,
+    );
+    let mut migrator = sqlx_core::migrate::Migrator::with_migrations(vec![migration]);
+    migrator.dangerous_set_table_name(table_name.to_owned());
+
+    migrator.run_direct(None, &mut conn, false).await?;
+
+    let exists: bool = sqlx_core::query_scalar::query_scalar(
+        "SELECT CONVERT(bit, CASE WHEN OBJECT_ID(N'_sqlx_any_migrations_smoke_table', N'U') IS NULL THEN 0 ELSE 1 END)",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+
+    assert!(exists);
+
+    let _ = conn
+        .execute(sqlx_core::sql_str::AssertSqlSafe(format!(
+            "DROP TABLE IF EXISTS {table_name}_table"
+        )))
+        .await?;
+    let _ = conn
+        .execute(sqlx_core::sql_str::AssertSqlSafe(format!(
+            "DROP TABLE IF EXISTS {table_name}"
+        )))
+        .await?;
+    conn.close().await?;
+
     Ok(())
 }

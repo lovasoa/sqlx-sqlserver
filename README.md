@@ -10,7 +10,7 @@ to crates.io and is not wired into the `sqlx` facade crate, so examples use
 
 ```toml
 [dependencies]
-sqlx-sqlserver = "0.1"
+sqlx-sqlserver = "0.0.1-alpha"
 sqlx-core = "=0.9.0"
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
@@ -41,4 +41,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 For local development, run fast tests with `./scripts/ci.sh`. Run e2e tests
 with `MSSQL_DATABASE_URL=... ./scripts/test-mssql.sh`.
-

@@ -140,9 +140,9 @@ pub fn parse_options(input: &[u8]) -> Result<Vec<PreLoginOption>, PreLoginError>
 /// Maps SQL Server connection encryption preferences to the TDS pre-login byte.
 pub fn encode_encrypt(encrypt: Encrypt) -> u8 {
     match encrypt {
-        Encrypt::NotSupported => 0x00,
-        Encrypt::Off => 0x02,
+        Encrypt::Off => 0x00,
         Encrypt::On => 0x01,
+        Encrypt::NotSupported => 0x02,
         Encrypt::Required => 0x03,
     }
 }
@@ -150,9 +150,9 @@ pub fn encode_encrypt(encrypt: Encrypt) -> u8 {
 /// Maps a TDS pre-login encryption byte to a connection encryption preference.
 pub fn decode_encrypt(value: u8) -> Result<Encrypt, PreLoginError> {
     match value {
-        0x00 => Ok(Encrypt::NotSupported),
+        0x00 => Ok(Encrypt::Off),
         0x01 => Ok(Encrypt::On),
-        0x02 => Ok(Encrypt::Off),
+        0x02 => Ok(Encrypt::NotSupported),
         0x03 => Ok(Encrypt::Required),
         _ => Err(PreLoginError::InvalidEncrypt(value)),
     }
@@ -266,6 +266,19 @@ mod tests {
     }
 
     #[test]
+    fn encryption_values_match_tds_wire_values() {
+        assert_eq!(0x00, encode_encrypt(Encrypt::Off));
+        assert_eq!(0x01, encode_encrypt(Encrypt::On));
+        assert_eq!(0x02, encode_encrypt(Encrypt::NotSupported));
+        assert_eq!(0x03, encode_encrypt(Encrypt::Required));
+
+        assert_eq!(Encrypt::Off, decode_encrypt(0x00).unwrap());
+        assert_eq!(Encrypt::On, decode_encrypt(0x01).unwrap());
+        assert_eq!(Encrypt::NotSupported, decode_encrypt(0x02).unwrap());
+        assert_eq!(Encrypt::Required, decode_encrypt(0x03).unwrap());
+    }
+
+    #[test]
     fn rejects_unknown_encryption_value() {
         assert_eq!(
             Err(PreLoginError::InvalidEncrypt(0x7f)),
@@ -344,7 +357,7 @@ mod tests {
         let parsed = parse_options(&payload).unwrap();
 
         assert!(parsed.iter().any(|option| {
-            option.token == PreLoginOptionToken::Encryption && option.data == vec![0x00]
+            option.token == PreLoginOptionToken::Encryption && option.data == vec![0x02]
         }));
         assert!(parsed.iter().any(|option| {
             option.token == PreLoginOptionToken::Instance && option.data == b"SQLEXPRESS\0"
@@ -359,7 +372,10 @@ mod tests {
         }])
         .unwrap();
 
-        assert_eq!(Encrypt::Off, parse_server_encrypt(&payload).unwrap());
+        assert_eq!(
+            Encrypt::NotSupported,
+            parse_server_encrypt(&payload).unwrap()
+        );
     }
 
     #[test]

@@ -31,6 +31,8 @@ mod arguments;
 mod column;
 mod connection;
 mod database;
+#[cfg(feature = "migrate")]
+mod migrate;
 /// Connection option parsing and configuration for SQL Server.
 pub mod options;
 pub mod protocol;
@@ -70,3 +72,4 @@ impl<'c, T> MssqlExecutor<'c> for T where T: sqlx_core::executor::Executor<'c, D
 
 sqlx_core::impl_into_arguments_for_arguments!(MssqlArguments);
 sqlx_core::impl_encode_for_option!(Mssql);
+sqlx_core::impl_acquire!(Mssql, MssqlConnection);

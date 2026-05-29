@@ -314,8 +314,9 @@ impl TypeInfo {
 
     pub(crate) fn get_value(&self, input: &mut &[u8]) -> Result<Option<Vec<u8>>, TypeInfoError> {
         Ok(match self.ty {
-            DataType::Null
-            | DataType::TinyInt
+            DataType::Null => None,
+
+            DataType::TinyInt
             | DataType::Bit
             | DataType::SmallInt
             | DataType::Int

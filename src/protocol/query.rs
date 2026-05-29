@@ -15,6 +15,7 @@ const TOKEN_INFO: u8 = 0xab;
 const TOKEN_RETURN_STATUS: u8 = 0x79;
 const TOKEN_RETURN_VALUE: u8 = 0xac;
 const TOKEN_ROW: u8 = 0xd1;
+const TOKEN_NBCROW: u8 = 0xd2;
 const TOKEN_ENVCHANGE: u8 = 0xe3;
 const TOKEN_DONE: u8 = 0xfd;
 const TOKEN_DONEPROC: u8 = 0xfe;
@@ -58,6 +59,7 @@ pub(crate) fn parse_query_response(input: &[u8]) -> Result<QueryOutput, Error> {
         match token {
             TOKEN_COL_METADATA => columns = ColMetaData::get(&mut input)?,
             TOKEN_ROW => rows.push(Row::get(&mut input, false, &columns)?),
+            TOKEN_NBCROW => rows.push(Row::get(&mut input, true, &columns)?),
             TOKEN_RETURN_VALUE => {
                 return_values.push(ReturnValue::get(&mut input)?.into_value());
             }
@@ -124,7 +126,7 @@ mod tests {
     use super::*;
     use crate::Mssql;
     use sqlx_core::row::Row;
-    use sqlx_core::value::Value;
+    use sqlx_core::value::{Value, ValueRef};
 
     #[test]
     fn sql_batch_packet_starts_with_all_headers_and_utf16_sql() {
@@ -169,6 +171,22 @@ mod tests {
         let output = parse_query_response(&response).unwrap();
 
         assert_eq!(7_i32, output.rows[0].try_get::<i32, _>(0).unwrap());
+    }
+
+    #[test]
+    fn parses_null_typed_value_as_null() {
+        let response = [col_metadata_null("value"), row_null(), done(0x10, 0, 1)].concat();
+        let output = parse_query_response(&response).unwrap();
+
+        assert!(output.rows[0].try_get_raw(0).unwrap().is_null());
+    }
+
+    #[test]
+    fn parses_nbcrow_null_bitmap() {
+        let response = [col_metadata_intn("value"), nbcrow_null(1), done(0x10, 0, 1)].concat();
+        let output = parse_query_response(&response).unwrap();
+
+        assert!(output.rows[0].try_get_raw(0).unwrap().is_null());
     }
 
     #[test]
@@ -226,6 +244,17 @@ mod tests {
         out
     }
 
+    fn col_metadata_null(name: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(TOKEN_COL_METADATA);
+        out.extend_from_slice(&1_u16.to_le_bytes());
+        out.extend_from_slice(&0_u32.to_le_bytes());
+        out.extend_from_slice(&0_u16.to_le_bytes());
+        out.push(crate::protocol::type_info::DataType::Null as u8);
+        push_b_varchar(&mut out, name);
+        out
+    }
+
     fn row_int(value: i32) -> Vec<u8> {
         let mut out = Vec::new();
         out.push(TOKEN_ROW);
@@ -238,6 +267,16 @@ mod tests {
         out.push(TOKEN_ROW);
         out.push(4);
         out.extend_from_slice(&value.to_le_bytes());
+        out
+    }
+
+    fn row_null() -> Vec<u8> {
+        vec![TOKEN_ROW]
+    }
+
+    fn nbcrow_null(column_count: usize) -> Vec<u8> {
+        let mut out = vec![TOKEN_NBCROW];
+        out.resize(1 + column_count.div_ceil(8), 0xff);
         out
     }
 

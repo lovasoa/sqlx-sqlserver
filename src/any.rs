@@ -28,7 +28,7 @@ use sqlx_core::{Either, Error, HashMap};
 use std::sync::Arc;
 
 /// Installable SQL Server driver for SQLx `Any` connections.
-pub const DRIVER: AnyDriver = AnyDriver::without_migrate::<Mssql>();
+pub const DRIVER: AnyDriver = AnyDriver::with_migrate::<Mssql>();
 
 impl AnyConnectionBackend for MssqlConnection {
     fn name(&self) -> &str {
@@ -77,6 +77,13 @@ impl AnyConnectionBackend for MssqlConnection {
 
     fn should_flush(&self) -> bool {
         Connection::should_flush(self)
+    }
+
+    #[cfg(feature = "migrate")]
+    fn as_migrate(
+        &mut self,
+    ) -> sqlx_core::Result<&mut (dyn sqlx_core::migrate::Migrate + Send + 'static)> {
+        Ok(self)
     }
 
     fn fetch_many(

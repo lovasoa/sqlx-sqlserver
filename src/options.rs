@@ -188,6 +188,11 @@ impl MssqlConnectOptions {
     pub(crate) fn set_hostname_for_test(&mut self, hostname: String) {
         self.hostname = hostname;
     }
+
+    #[cfg(feature = "migrate")]
+    pub(crate) fn set_database_for_maintenance(&mut self) {
+        self.database = "master".to_owned();
+    }
 }
 
 impl FromStr for MssqlConnectOptions {
