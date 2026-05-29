@@ -1,10 +1,13 @@
-use sqlx_core::column::Column;
 use sqlx_core::Error;
 
+use super::col_meta_data::ColMetaData;
+use super::done::{Done, Status};
 use super::packet::{encode_message, PacketFrameError, PacketType};
+use super::read::{read_len_prefixed, read_u8};
+use super::return_value::ReturnValue;
+use super::row::Row;
 use super::token::{parse_env_change, parse_server_error, EnvChange, ServerError, TokenParseError};
-use super::type_info::{TypeInfo as ProtocolTypeInfo, TypeInfoError};
-use crate::{MssqlColumn, MssqlQueryResult, MssqlRow, MssqlTypeInfo, MssqlValue};
+use crate::{MssqlColumn, MssqlQueryResult, MssqlRow, MssqlValue};
 
 const TOKEN_COL_METADATA: u8 = 0x81;
 const TOKEN_ERROR: u8 = 0xaa;
@@ -15,8 +18,6 @@ const TOKEN_ENVCHANGE: u8 = 0xe3;
 const TOKEN_DONE: u8 = 0xfd;
 const TOKEN_DONEPROC: u8 = 0xfe;
 const TOKEN_DONEINPROC: u8 = 0xff;
-
-const DONE_COUNT: u16 = 0x0010;
 
 #[derive(Debug)]
 pub(crate) struct QueryOutput {
@@ -54,15 +55,15 @@ pub(crate) fn parse_query_response(input: &[u8]) -> Result<QueryOutput, Error> {
         let token = read_u8(&mut input)?;
 
         match token {
-            TOKEN_COL_METADATA => columns = parse_col_metadata(&mut input)?,
-            TOKEN_ROW => rows.push(parse_row(&mut input, &columns)?),
+            TOKEN_COL_METADATA => columns = ColMetaData::get(&mut input)?,
+            TOKEN_ROW => rows.push(Row::get(&mut input, false, &columns)?),
             TOKEN_RETURN_VALUE => {
-                return_values.push(parse_return_value(&mut input)?);
+                return_values.push(ReturnValue::get(&mut input)?.into_value());
             }
             TOKEN_DONE | TOKEN_DONEPROC | TOKEN_DONEINPROC => {
-                let done = parse_done(&mut input)?;
-                if done.status & DONE_COUNT != 0 {
-                    rows_affected += done.row_count;
+                let done = Done::get(&mut input)?;
+                if done.status.contains(Status::DONE_COUNT) {
+                    rows_affected += done.affected_rows;
                 }
             }
             TOKEN_ERROR => {
@@ -103,133 +104,6 @@ pub(crate) fn write_all_headers(out: &mut Vec<u8>, transaction_descriptor: u64) 
     out.extend_from_slice(&1_u32.to_le_bytes());
 }
 
-fn parse_col_metadata(input: &mut &[u8]) -> Result<Vec<MssqlColumn>, Error> {
-    let count = read_u16_le(input)?;
-    if count == 0xffff {
-        return Ok(Vec::new());
-    }
-
-    let mut columns = Vec::with_capacity(usize::from(count));
-    for ordinal in 0..usize::from(count) {
-        let _user_type = read_u32_le(input)?;
-        let _flags = read_u16_le(input)?;
-        let type_info = ProtocolTypeInfo::get(input).map_err(type_info_error)?;
-        let name = read_b_varchar(input)?;
-
-        columns.push(MssqlColumn::new(
-            ordinal,
-            name,
-            MssqlTypeInfo::from_protocol(&type_info),
-        ));
-    }
-
-    Ok(columns)
-}
-
-fn parse_row(input: &mut &[u8], columns: &[MssqlColumn]) -> Result<MssqlRow, Error> {
-    let mut values = Vec::with_capacity(columns.len());
-
-    for column in columns {
-        let type_info = column.type_info();
-        let value = parse_protocol_value(input, type_info)?;
-
-        values.push(value);
-    }
-
-    Ok(MssqlRow::new(columns.to_vec(), values))
-}
-
-fn parse_protocol_value(input: &mut &[u8], type_info: &MssqlTypeInfo) -> Result<MssqlValue, Error> {
-    let protocol_type_info = type_info
-        .protocol_type_info()
-        .ok_or_else(|| Error::Protocol(format!("missing protocol type info for {type_info}")))?;
-    let data = protocol_type_info
-        .get_value(input)
-        .map_err(type_info_error)?;
-    Ok(MssqlValue::new(type_info.clone(), data))
-}
-
-fn parse_done(input: &mut &[u8]) -> Result<Done, Error> {
-    Ok(Done {
-        status: read_u16_le(input)?,
-        _current_command: read_u16_le(input)?,
-        row_count: read_u64_le(input)?,
-    })
-}
-
-fn parse_return_value(input: &mut &[u8]) -> Result<MssqlValue, Error> {
-    let _param_ordinal = read_u16_le(input)?;
-    let _param_name = read_b_varchar(input)?;
-    let _status = read_u8(input)?;
-    let _user_type = read_u32_le(input)?;
-    let _flags = read_u16_le(input)?;
-    let protocol_type_info = ProtocolTypeInfo::get(input).map_err(type_info_error)?;
-    let type_info = MssqlTypeInfo::from_protocol(&protocol_type_info);
-    let data = protocol_type_info
-        .get_value(input)
-        .map_err(type_info_error)?;
-    Ok(MssqlValue::new(type_info, data))
-}
-
-struct Done {
-    status: u16,
-    _current_command: u16,
-    row_count: u64,
-}
-
-fn read_len_prefixed<'a>(input: &mut &'a [u8]) -> Result<&'a [u8], Error> {
-    let len = usize::from(read_u16_le(input)?);
-    take(input, len)
-}
-
-fn read_b_varchar(input: &mut &[u8]) -> Result<String, Error> {
-    let len_chars = usize::from(read_u8(input)?);
-    read_utf16(input, len_chars)
-}
-
-fn read_utf16(input: &mut &[u8], len_chars: usize) -> Result<String, Error> {
-    let len_bytes = len_chars
-        .checked_mul(2)
-        .ok_or_else(|| Error::Protocol("SQL Server string length overflow".to_owned()))?;
-    let bytes = take(input, len_bytes)?;
-    let units = bytes
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect::<Vec<_>>();
-
-    String::from_utf16(&units)
-        .map_err(|_| Error::Protocol("SQL Server string contained invalid UTF-16".to_owned()))
-}
-
-fn read_u8(input: &mut &[u8]) -> Result<u8, Error> {
-    Ok(take(input, 1)?[0])
-}
-
-fn read_u16_le(input: &mut &[u8]) -> Result<u16, Error> {
-    let bytes = take(input, 2)?;
-    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
-}
-
-fn read_u32_le(input: &mut &[u8]) -> Result<u32, Error> {
-    let bytes = take(input, 4)?;
-    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-}
-
-fn read_u64_le(input: &mut &[u8]) -> Result<u64, Error> {
-    let bytes = take(input, 8)?;
-    Ok(u64::from_le_bytes([
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-    ]))
-}
-
-fn take<'a>(input: &mut &'a [u8], len: usize) -> Result<&'a [u8], Error> {
-    let bytes = input.get(..len).ok_or_else(|| {
-        Error::Protocol("SQL Server query token ended before expected length".to_owned())
-    })?;
-    *input = &input[len..];
-    Ok(bytes)
-}
-
 fn server_error(error: ServerError) -> Error {
     Error::Protocol(format!(
         "SQL Server error {} (state {}, class {}): {}",
@@ -238,10 +112,6 @@ fn server_error(error: ServerError) -> Error {
 }
 
 fn token_parse_error(error: TokenParseError) -> Error {
-    Error::Protocol(error.to_string())
-}
-
-fn type_info_error(error: TypeInfoError) -> Error {
     Error::Protocol(error.to_string())
 }
 
