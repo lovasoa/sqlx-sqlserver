@@ -81,11 +81,34 @@ pub struct ServerError {
 
 /// ENVCHANGE token data.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EnvChange {
-    /// Environment change type byte.
-    pub change_type: u8,
-    /// Raw change payload after the type byte.
-    pub data: Vec<u8>,
+pub enum EnvChange {
+    /// Current database changed.
+    Database(String),
+    /// Current language changed.
+    Language(String),
+    /// Current character set changed.
+    CharacterSet(String),
+    /// Server accepted a packet size.
+    PacketSize(u32),
+    /// Unicode sorting locale changed.
+    UnicodeDataSortingLocalId(String),
+    /// Unicode sorting comparison flags changed.
+    UnicodeDataSortingComparisonFlags(String),
+    /// SQL collation changed.
+    SqlCollation(Vec<u8>),
+    /// Server started a transaction and returned its descriptor.
+    BeginTransaction(u64),
+    /// Server committed a transaction.
+    CommitTransaction(u64),
+    /// Server rolled back a transaction.
+    RollbackTransaction(u64),
+    /// ENVCHANGE type not currently interpreted by this driver.
+    Ignored {
+        /// Environment change type byte.
+        change_type: u8,
+        /// Raw change payload after the type byte.
+        data: Vec<u8>,
+    },
 }
 
 /// DONE token data.
@@ -106,6 +129,8 @@ pub enum LoginResponse {
     Success {
         /// Accepted login metadata returned by the server.
         login_ack: LoginAck,
+        /// Environment changes received during login.
+        env_changes: Vec<EnvChange>,
     },
     /// Server returned at least one ERROR token.
     ServerError(ServerError),
@@ -144,13 +169,14 @@ pub fn parse_login_response(input: &[u8]) -> Result<LoginResponse, TokenParseErr
     let tokens = parse_tokens(input)?;
     let mut login_ack = None;
     let mut done = false;
+    let mut env_changes = Vec::new();
 
     for token in tokens {
         match token {
             Token::LoginAck(ack) => login_ack = Some(ack),
             Token::Error(error) => return Ok(LoginResponse::ServerError(error)),
             Token::Done(_) => done = true,
-            Token::EnvChange(_) => {}
+            Token::EnvChange(change) => env_changes.push(change),
         }
     }
 
@@ -159,7 +185,10 @@ pub fn parse_login_response(input: &[u8]) -> Result<LoginResponse, TokenParseErr
         return Err(TokenParseError::MissingDone);
     }
 
-    Ok(LoginResponse::Success { login_ack })
+    Ok(LoginResponse::Success {
+        login_ack,
+        env_changes,
+    })
 }
 
 fn parse_login_ack(mut input: &[u8]) -> Result<LoginAck, TokenParseError> {
@@ -208,12 +237,30 @@ fn parse_error(mut input: &[u8]) -> Result<ServerError, TokenParseError> {
     })
 }
 
-fn parse_env_change(mut input: &[u8]) -> Result<EnvChange, TokenParseError> {
+pub(crate) fn parse_env_change(mut input: &[u8]) -> Result<EnvChange, TokenParseError> {
     let change_type = read_u8(&mut input)?;
 
-    Ok(EnvChange {
-        change_type,
-        data: input.to_vec(),
+    Ok(match change_type {
+        1 => EnvChange::Database(read_b_varchar(&mut input)?),
+        2 => EnvChange::Language(read_b_varchar(&mut input)?),
+        3 => EnvChange::CharacterSet(read_b_varchar(&mut input)?),
+        4 => {
+            let size = read_b_varchar(&mut input)?;
+            EnvChange::PacketSize(
+                size.parse()
+                    .map_err(|_| TokenParseError::InvalidEnvChangePacketSize(size))?,
+            )
+        }
+        5 => EnvChange::UnicodeDataSortingLocalId(read_b_varchar(&mut input)?),
+        6 => EnvChange::UnicodeDataSortingComparisonFlags(read_b_varchar(&mut input)?),
+        7 => EnvChange::SqlCollation(read_b_varbyte(&mut input)?.to_vec()),
+        8 => EnvChange::BeginTransaction(read_b_varbyte_u64_le(&mut input)?),
+        9 => EnvChange::CommitTransaction(read_transaction_end_descriptor(&mut input)?),
+        10 => EnvChange::RollbackTransaction(read_transaction_end_descriptor(&mut input)?),
+        _ => EnvChange::Ignored {
+            change_type,
+            data: input.to_vec(),
+        },
     })
 }
 
@@ -233,6 +280,11 @@ fn read_len_prefixed_token<'a>(input: &mut &'a [u8]) -> Result<&'a [u8], TokenPa
 fn read_b_varchar(input: &mut &[u8]) -> Result<String, TokenParseError> {
     let len_chars = usize::from(read_u8(input)?);
     read_utf16_string(input, len_chars)
+}
+
+fn read_b_varbyte<'a>(input: &mut &'a [u8]) -> Result<&'a [u8], TokenParseError> {
+    let len = usize::from(read_u8(input)?);
+    take(input, len)
 }
 
 fn read_us_varchar(input: &mut &[u8]) -> Result<String, TokenParseError> {
@@ -284,6 +336,16 @@ fn read_u64_le(input: &mut &[u8]) -> Result<u64, TokenParseError> {
     ]))
 }
 
+fn read_b_varbyte_u64_le(input: &mut &[u8]) -> Result<u64, TokenParseError> {
+    let mut bytes = read_b_varbyte(input)?;
+    read_u64_le(&mut bytes)
+}
+
+fn read_transaction_end_descriptor(input: &mut &[u8]) -> Result<u64, TokenParseError> {
+    let _new_descriptor = read_b_varbyte(input)?;
+    read_u64_le(input)
+}
+
 fn take<'a>(input: &mut &'a [u8], len: usize) -> Result<&'a [u8], TokenParseError> {
     let bytes = input.get(..len).ok_or(TokenParseError::UnexpectedEof)?;
     *input = &input[len..];
@@ -322,6 +384,9 @@ pub enum TokenParseError {
     /// A LOGIN7 response did not include DONE.
     #[error("TDS login response did not include DONE")]
     MissingDone,
+    /// ENVCHANGE packet size was not a decimal integer.
+    #[error("TDS ENVCHANGE packet size `{0}` is not a valid integer")]
+    InvalidEnvChangePacketSize(String),
 }
 
 #[cfg(test)]
@@ -335,7 +400,7 @@ mod tests {
             env_change(
                 4,
                 &[
-                    6, b'4', 0, b'0', 0, b'9', 0, b'6', 0, 4, b'5', 0, b'1', 0, b'2', 0,
+                    4, b'4', 0, b'0', 0, b'9', 0, b'6', 0, 3, b'5', 0, b'1', 0, b'2', 0,
                 ],
             ),
             done(0, 0, 0),
@@ -356,8 +421,25 @@ mod tests {
                     build_number_high: 0x10,
                     build_number_low: 0x4a,
                 },
+                env_changes: vec![EnvChange::PacketSize(4096)],
             },
             parse_login_response(&bytes).unwrap()
+        );
+    }
+
+    #[test]
+    fn parses_transaction_envchanges() {
+        assert_eq!(
+            EnvChange::BeginTransaction(0x0102_0304_0506_0708),
+            parse_env_change(&[8, 8, 8, 7, 6, 5, 4, 3, 2, 1,]).unwrap()
+        );
+        assert_eq!(
+            EnvChange::CommitTransaction(0x1112_1314_1516_1718),
+            parse_env_change(&[9, 0, 0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11,]).unwrap()
+        );
+        assert_eq!(
+            EnvChange::RollbackTransaction(0x2122_2324_2526_2728),
+            parse_env_change(&[10, 0, 0x28, 0x27, 0x26, 0x25, 0x24, 0x23, 0x22, 0x21,]).unwrap()
         );
     }
 

@@ -20,7 +20,9 @@ use crate::protocol::query::{build_sql_batch_packet, parse_query_response, Query
 use crate::protocol::rpc::{
     build_execute_sql_packet, build_prepare_packet, build_unprepare_packet,
 };
-use crate::protocol::token::{parse_login_response, LoginResponse, ServerError, TokenParseError};
+use crate::protocol::token::{
+    parse_login_response, EnvChange, LoginResponse, ServerError, TokenParseError,
+};
 use crate::tls::TlsPreloginStream;
 use crate::{
     ssrp, Encrypt, Mssql, MssqlArguments, MssqlConnectOptions, MssqlQueryResult, MssqlRow,
@@ -32,6 +34,7 @@ use crate::{
 pub struct MssqlConnection {
     stream: Option<MssqlWireStream>,
     transaction_depth: usize,
+    transaction_descriptor: u64,
 }
 
 impl MssqlConnection {
@@ -70,11 +73,35 @@ impl MssqlConnection {
         }
 
         match parse_login_response(&login_response.payload).map_err(token_error)? {
-            LoginResponse::Success { .. } => Ok(Self {
-                stream: Some(stream),
-                transaction_depth: 0,
-            }),
+            LoginResponse::Success { env_changes, .. } => {
+                let mut conn = Self {
+                    stream: Some(stream),
+                    transaction_depth: 0,
+                    transaction_descriptor: 0,
+                };
+                conn.apply_env_changes(&env_changes);
+                Ok(conn)
+            }
             LoginResponse::ServerError(error) => Err(server_error(error)),
+        }
+    }
+
+    fn apply_env_changes(&mut self, env_changes: &[EnvChange]) {
+        for change in env_changes {
+            match change {
+                EnvChange::PacketSize(size) => {
+                    if let Some(stream) = self.stream.as_mut() {
+                        stream.packet_size = (*size).clamp(512, 32767) as usize;
+                    }
+                }
+                EnvChange::BeginTransaction(descriptor) => {
+                    self.transaction_descriptor = *descriptor;
+                }
+                EnvChange::CommitTransaction(_) | EnvChange::RollbackTransaction(_) => {
+                    self.transaction_descriptor = 0;
+                }
+                _ => {}
+            }
         }
     }
 
@@ -96,8 +123,10 @@ impl MssqlConnection {
     }
 
     pub(crate) async fn run_sql_batch(&mut self, sql: &str) -> Result<QueryOutput, Error> {
+        let transaction_descriptor = self.transaction_descriptor;
         let stream = self.stream.as_mut().ok_or_else(wire_not_implemented)?;
-        let packet = build_sql_batch_packet(sql, stream.packet_size, 0).map_err(frame_error)?;
+        let packet = build_sql_batch_packet(sql, stream.packet_size, transaction_descriptor)
+            .map_err(frame_error)?;
         stream.write_all(&packet).await?;
 
         self.read_query_response().await
@@ -110,11 +139,17 @@ impl MssqlConnection {
     ) -> Result<QueryOutput, Error> {
         match arguments {
             Some(arguments) if !arguments.is_empty() => {
+                let transaction_descriptor = self.transaction_descriptor;
                 let stream = self.stream.as_mut().ok_or_else(wire_not_implemented)?;
-                let packet = build_execute_sql_packet(sql, arguments, stream.packet_size, 0)
-                    .map_err(|error| {
-                        Error::Protocol(format!("failed to encode SQL Server RPC: {error}"))
-                    })?;
+                let packet = build_execute_sql_packet(
+                    sql,
+                    arguments,
+                    stream.packet_size,
+                    transaction_descriptor,
+                )
+                .map_err(|error| {
+                    Error::Protocol(format!("failed to encode SQL Server RPC: {error}"))
+                })?;
                 stream.write_all(&packet).await?;
                 self.read_query_response().await
             }
@@ -127,23 +162,27 @@ impl MssqlConnection {
         sql: &str,
         parameters: &[MssqlTypeInfo],
     ) -> Result<QueryOutput, Error> {
+        let transaction_descriptor = self.transaction_descriptor;
         let stream = self.stream.as_mut().ok_or_else(wire_not_implemented)?;
         let packet =
-            build_prepare_packet(sql, parameters, stream.packet_size, 0).map_err(|error| {
-                Error::Protocol(format!("failed to encode SQL Server prepare RPC: {error}"))
-            })?;
+            build_prepare_packet(sql, parameters, stream.packet_size, transaction_descriptor)
+                .map_err(|error| {
+                    Error::Protocol(format!("failed to encode SQL Server prepare RPC: {error}"))
+                })?;
         stream.write_all(&packet).await?;
 
         let output = self.read_query_response().await?;
 
         if let Some(statement_id) = first_i32_return_value(&output)? {
+            let transaction_descriptor = self.transaction_descriptor;
             let stream = self.stream.as_mut().ok_or_else(wire_not_implemented)?;
             let packet =
-                build_unprepare_packet(statement_id, stream.packet_size, 0).map_err(|error| {
-                    Error::Protocol(format!(
-                        "failed to encode SQL Server unprepare RPC: {error}"
-                    ))
-                })?;
+                build_unprepare_packet(statement_id, stream.packet_size, transaction_descriptor)
+                    .map_err(|error| {
+                        Error::Protocol(format!(
+                            "failed to encode SQL Server unprepare RPC: {error}"
+                        ))
+                    })?;
             stream.write_all(&packet).await?;
             let _ = self.read_query_response().await?;
         }
@@ -161,7 +200,9 @@ impl MssqlConnection {
             )));
         }
 
-        parse_query_response(&response.payload)
+        let output = parse_query_response(&response.payload)?;
+        self.apply_env_changes(&output.env_changes);
+        Ok(output)
     }
 }
 

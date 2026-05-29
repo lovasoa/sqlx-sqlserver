@@ -2,7 +2,7 @@ use sqlx_core::column::Column;
 use sqlx_core::Error;
 
 use super::packet::{encode_message, PacketFrameError, PacketType};
-use super::token::{parse_server_error, ServerError, TokenParseError};
+use super::token::{parse_env_change, parse_server_error, EnvChange, ServerError, TokenParseError};
 use crate::{MssqlColumn, MssqlQueryResult, MssqlRow, MssqlType, MssqlTypeInfo, MssqlValue};
 
 const TOKEN_COL_METADATA: u8 = 0x81;
@@ -36,6 +36,7 @@ pub(crate) struct QueryOutput {
     pub(crate) rows: Vec<MssqlRow>,
     pub(crate) result: MssqlQueryResult,
     pub(crate) return_values: Vec<MssqlValue>,
+    pub(crate) env_changes: Vec<EnvChange>,
 }
 
 pub(crate) fn build_sql_batch_packet(
@@ -58,6 +59,7 @@ pub(crate) fn parse_query_response(input: &[u8]) -> Result<QueryOutput, Error> {
     let mut columns = Vec::new();
     let mut rows = Vec::new();
     let mut return_values = Vec::new();
+    let mut env_changes = Vec::new();
     let mut rows_affected = 0;
 
     while !input.is_empty() {
@@ -80,7 +82,12 @@ pub(crate) fn parse_query_response(input: &[u8]) -> Result<QueryOutput, Error> {
                     .map_err(token_parse_error)?;
                 return Err(server_error(error));
             }
-            TOKEN_INFO | TOKEN_ENVCHANGE => {
+            TOKEN_ENVCHANGE => {
+                env_changes.push(
+                    parse_env_change(read_len_prefixed(&mut input)?).map_err(token_parse_error)?,
+                );
+            }
+            TOKEN_INFO => {
                 let _ = read_len_prefixed(&mut input)?;
             }
             other => {
@@ -96,6 +103,7 @@ pub(crate) fn parse_query_response(input: &[u8]) -> Result<QueryOutput, Error> {
         rows,
         result: MssqlQueryResult::new(rows_affected),
         return_values,
+        env_changes,
     })
 }
 
@@ -387,6 +395,17 @@ mod tests {
     }
 
     #[test]
+    fn sql_batch_packet_writes_transaction_descriptor() {
+        let packet = build_sql_batch_packet("SELECT 1", 512, 0x0102_0304_0506_0708).unwrap();
+        let payload = &packet[8..];
+
+        assert_eq!(
+            0x0102_0304_0506_0708,
+            u64::from_le_bytes(payload[10..18].try_into().unwrap())
+        );
+    }
+
+    #[test]
     fn parses_select_one_response() {
         let response = [col_metadata_int(""), row_int(1), done(0x10, 0, 1)].concat();
         let output = parse_query_response(&response).unwrap();
@@ -414,6 +433,25 @@ mod tests {
             42_i32,
             <i32 as sqlx_core::decode::Decode<Mssql>>::decode(output.return_values[0].as_ref())
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn collects_envchange_tokens_from_query_response() {
+        let response = [
+            env_change(4, &[4, b'8', 0, b'1', 0, b'9', 0, b'2', 0]),
+            env_change(8, &[8, 8, 7, 6, 5, 4, 3, 2, 1]),
+            done(0, 0, 0),
+        ]
+        .concat();
+        let output = parse_query_response(&response).unwrap();
+
+        assert_eq!(
+            output.env_changes,
+            vec![
+                EnvChange::PacketSize(8192),
+                EnvChange::BeginTransaction(0x0102_0304_0506_0708)
+            ]
         );
     }
 
@@ -467,6 +505,16 @@ mod tests {
         out.push(4);
         out.push(4);
         out.extend_from_slice(&value.to_le_bytes());
+        out
+    }
+
+    fn env_change(change_type: u8, data: &[u8]) -> Vec<u8> {
+        let len = 1 + data.len();
+        let mut out = Vec::new();
+        out.push(TOKEN_ENVCHANGE);
+        out.extend_from_slice(&u16::try_from(len).unwrap().to_le_bytes());
+        out.push(change_type);
+        out.extend_from_slice(data);
         out
     }
 
