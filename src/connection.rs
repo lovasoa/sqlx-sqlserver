@@ -1,6 +1,7 @@
 use futures_core::future::BoxFuture;
 use futures_core::stream::BoxStream;
 use futures_util::{future, stream, StreamExt};
+use native_tls::Certificate;
 use sqlx_core::connection::Connection;
 use sqlx_core::decode::Decode;
 use sqlx_core::error::Error;
@@ -10,6 +11,7 @@ use sqlx_core::value::Value;
 use sqlx_core::Either;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_native_tls::TlsConnector;
 
 use crate::protocol::login::{build_login7_packet, Login7Error};
 use crate::protocol::packet::{PacketHeader, PacketStatus, PacketType, PACKET_HEADER_LEN};
@@ -19,6 +21,7 @@ use crate::protocol::rpc::{
     build_execute_sql_packet, build_prepare_packet, build_unprepare_packet,
 };
 use crate::protocol::token::{parse_login_response, LoginResponse, ServerError, TokenParseError};
+use crate::tls::TlsPreloginStream;
 use crate::{
     ssrp, Encrypt, Mssql, MssqlArguments, MssqlConnectOptions, MssqlQueryResult, MssqlRow,
     MssqlStatement, MssqlTypeInfo,
@@ -49,7 +52,11 @@ impl MssqlConnection {
 
         let server_encrypt =
             parse_server_encrypt(&pre_login_response.payload).map_err(pre_login_error)?;
-        validate_unencrypted_login(options.encrypt(), server_encrypt)?;
+        let encrypted = negotiate_encryption(options.encrypt(), server_encrypt)?;
+
+        if encrypted {
+            stream.enable_tls(options).await?;
+        }
 
         let login = build_login7_packet(options).map_err(login_error)?;
         stream.write_all(&login).await?;
@@ -295,13 +302,27 @@ fn first_i32_return_value(output: &QueryOutput) -> Result<Option<i32>, Error> {
 }
 
 pub(crate) fn wire_not_implemented() -> Error {
-    Error::Protocol("SQL Server query execution is not implemented in this port slice".to_owned())
+    Error::Protocol("SQL Server connection stream is not available".to_owned())
 }
 
-#[derive(Debug)]
 struct MssqlWireStream {
-    stream: TcpStream,
+    stream: MssqlStream,
     packet_size: usize,
+}
+
+impl std::fmt::Debug for MssqlWireStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MssqlWireStream")
+            .field("encrypted", &matches!(self.stream, MssqlStream::Tls(_)))
+            .field("packet_size", &self.packet_size)
+            .finish()
+    }
+}
+
+enum MssqlStream {
+    Raw(TcpStream),
+    Tls(tokio_native_tls::TlsStream<TlsPreloginStream<TcpStream>>),
+    Taken,
 }
 
 impl MssqlWireStream {
@@ -321,19 +342,58 @@ impl MssqlWireStream {
         })?;
 
         Ok(Self {
-            stream,
+            stream: MssqlStream::Raw(stream),
             packet_size,
         })
     }
 
     async fn write_all(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        self.stream.write_all(bytes).await?;
-        self.stream.flush().await?;
+        match &mut self.stream {
+            MssqlStream::Raw(stream) => {
+                stream.write_all(bytes).await?;
+                stream.flush().await?;
+            }
+            MssqlStream::Tls(stream) => {
+                stream.write_all(bytes).await?;
+                stream.flush().await?;
+            }
+            MssqlStream::Taken => return Err(taken_stream_error()),
+        }
         Ok(())
     }
 
     async fn shutdown(&mut self) -> Result<(), Error> {
-        self.stream.shutdown().await?;
+        match &mut self.stream {
+            MssqlStream::Raw(stream) => stream.shutdown().await?,
+            MssqlStream::Tls(stream) => stream.shutdown().await?,
+            MssqlStream::Taken => return Err(taken_stream_error()),
+        }
+        Ok(())
+    }
+
+    async fn enable_tls(&mut self, options: &MssqlConnectOptions) -> Result<(), Error> {
+        let stream = match std::mem::replace(&mut self.stream, MssqlStream::Taken) {
+            MssqlStream::Raw(stream) => stream,
+            other => {
+                self.stream = other;
+                return Ok(());
+            }
+        };
+
+        let mut stream = TlsPreloginStream::new(stream);
+        stream.start_handshake();
+
+        let domain = options
+            .hostname_in_certificate()
+            .unwrap_or_else(|| options.host());
+        let connector = build_tls_connector(options)?;
+        let mut stream = connector
+            .connect(domain, stream)
+            .await
+            .map_err(|error| Error::Tls(error.into()))?;
+        stream.get_mut().get_mut().get_mut().finish_handshake();
+
+        self.stream = MssqlStream::Tls(stream);
         Ok(())
     }
 
@@ -344,7 +404,7 @@ impl MssqlWireStream {
 
         loop {
             let mut header_bytes = [0u8; PACKET_HEADER_LEN];
-            self.stream.read_exact(&mut header_bytes).await?;
+            self.read_exact(&mut header_bytes).await?;
             let header = PacketHeader::decode(&header_bytes).map_err(packet_error)?;
 
             if let Some(packet_type) = packet_type {
@@ -381,7 +441,7 @@ impl MssqlWireStream {
             })?;
             let old_len = payload.len();
             payload.resize(old_len + payload_len, 0);
-            self.stream.read_exact(&mut payload[old_len..]).await?;
+            self.read_exact(&mut payload[old_len..]).await?;
 
             expected_packet_id = Some(header.packet_id.wrapping_add(1));
 
@@ -393,6 +453,20 @@ impl MssqlWireStream {
             }
         }
     }
+
+    async fn read_exact(&mut self, bytes: &mut [u8]) -> Result<(), Error> {
+        match &mut self.stream {
+            MssqlStream::Raw(stream) => {
+                stream.read_exact(bytes).await?;
+            }
+            MssqlStream::Tls(stream) => {
+                stream.read_exact(bytes).await?;
+            }
+            MssqlStream::Taken => return Err(taken_stream_error()),
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -401,21 +475,46 @@ struct WireMessage {
     payload: Vec<u8>,
 }
 
-fn validate_unencrypted_login(
-    requested: Encrypt,
-    server: Encrypt,
-) -> std::result::Result<(), Error> {
+fn negotiate_encryption(requested: Encrypt, server: Encrypt) -> std::result::Result<bool, Error> {
     match (requested, server) {
-        (Encrypt::NotSupported, Encrypt::NotSupported | Encrypt::Off) => Ok(()),
+        (Encrypt::NotSupported, Encrypt::NotSupported | Encrypt::Off) => Ok(false),
         (Encrypt::NotSupported, Encrypt::On | Encrypt::Required) => Err(Error::Protocol(
-            "SQL Server requires encrypted login, but TLS is not implemented in this port slice"
+            "SQL Server requires encryption, but the client URL requested encrypt=not_supported"
                 .to_owned(),
         )),
-        _ => Err(Error::Protocol(
-            "SQL Server TLS pre-login is not implemented yet; use encrypt=not_supported only with servers that allow unencrypted login"
+        (Encrypt::Required, Encrypt::Off | Encrypt::NotSupported) => Err(Error::Tls(
+            "SQL Server TLS encryption is required but not supported by the server".into(),
+        )),
+        (Encrypt::On | Encrypt::Required, Encrypt::On | Encrypt::Required) => Ok(true),
+        (Encrypt::Off, _) | (_, Encrypt::Off) => Err(Error::Protocol(
+            "SQL Server login-only TLS fallback is not implemented yet; use encrypt=mandatory or encrypt=strict for encrypted connections, or encrypt=not_supported for plaintext development servers"
                 .to_owned(),
         )),
+        (Encrypt::On, Encrypt::NotSupported) => Ok(false),
     }
+}
+
+fn build_tls_connector(options: &MssqlConnectOptions) -> Result<TlsConnector, Error> {
+    let mut builder = native_tls::TlsConnector::builder();
+    builder.danger_accept_invalid_certs(options.trust_server_certificate());
+    builder.danger_accept_invalid_hostnames(options.hostname_in_certificate().is_none());
+
+    if let Some(path) = options.ssl_root_cert() {
+        let cert = std::fs::read(path).map_err(Error::Io)?;
+        let cert = Certificate::from_pem(&cert)
+            .or_else(|_| Certificate::from_der(&cert))
+            .map_err(|error| Error::Tls(error.into()))?;
+        builder.add_root_certificate(cert);
+    }
+
+    builder
+        .build()
+        .map(TlsConnector::from)
+        .map_err(|error| Error::Tls(error.into()))
+}
+
+fn taken_stream_error() -> Error {
+    Error::Protocol("SQL Server stream was used while TLS upgrade was in progress".to_owned())
 }
 
 fn server_error(error: ServerError) -> Error {
@@ -456,4 +555,27 @@ fn stream_query_output(
             .chain(std::iter::once(Ok(Either::Left(output.result)))),
     )
     .boxed()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negotiates_full_tls_for_required_or_mandatory_encryption() {
+        assert!(negotiate_encryption(Encrypt::On, Encrypt::On).unwrap());
+        assert!(negotiate_encryption(Encrypt::Required, Encrypt::Required).unwrap());
+    }
+
+    #[test]
+    fn allows_plaintext_only_when_explicitly_requested_and_supported() {
+        assert!(!negotiate_encryption(Encrypt::NotSupported, Encrypt::Off).unwrap());
+        assert!(negotiate_encryption(Encrypt::NotSupported, Encrypt::Required).is_err());
+    }
+
+    #[test]
+    fn rejects_login_only_tls_fallback_until_downgrade_is_available() {
+        assert!(negotiate_encryption(Encrypt::Off, Encrypt::On).is_err());
+        assert!(negotiate_encryption(Encrypt::On, Encrypt::Off).is_err());
+    }
 }

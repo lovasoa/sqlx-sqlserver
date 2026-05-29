@@ -2,9 +2,9 @@
 //!
 //! This crate is intentionally outside the SQLx workspace and does not use
 //! local `path` dependencies. The current port includes tested connection
-//! option parsing, PRELOGIN/LOGIN7 handshake support for unencrypted development
-//! servers, SQL batch execution, transaction batches, and RPC execution for
-//! stable scalar bind parameters.
+//! option parsing, PRELOGIN/LOGIN7 handshake support, TDS-wrapped TLS handshake
+//! support for encrypted SQL Server connections, SQL batch execution,
+//! transaction batches, and RPC execution for stable scalar bind parameters.
 //!
 //! # Testing
 //!
@@ -18,7 +18,7 @@
 //! absent:
 //!
 //! ```text
-//! MSSQL_DATABASE_URL='mssql://sa:Password123!@localhost:1433/master?encrypt=not_supported' \
+//! MSSQL_DATABASE_URL='mssql://sa:Password123!@localhost:1433/master?encrypt=mandatory&trust_server_certificate=true' \
 //! cargo test --features integration-tests --test mssql_smoke
 //! ```
 
@@ -38,6 +38,7 @@ mod query_result;
 mod row;
 mod ssrp;
 mod statement;
+mod tls;
 mod transaction;
 mod type_info;
 mod value;
