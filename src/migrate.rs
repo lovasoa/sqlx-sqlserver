@@ -266,7 +266,7 @@ async fn execute_migration(
 ) -> Result<(), MigrateError> {
     conn.execute(migration.sql.clone())
         .await
-        .map_err(|error| MigrateError::ExecuteMigration(error, migration.version))?;
+        .map_err(|error| revert_execution_error(error, migration.version))?;
 
     query(AssertSqlSafe(format!(
         r#"
@@ -302,6 +302,13 @@ async fn revert_migration(
     Ok(())
 }
 
+fn revert_execution_error(error: sqlx_core::Error, version: i64) -> MigrateError {
+    MigrateError::ExecuteMigration(
+        sqlx_core::Error::Protocol(format!("while reverting migration {version}: {error}")),
+        version,
+    )
+}
+
 fn quote_ident(identifier: &str) -> String {
     format!("[{}]", identifier.replace(']', "]]"))
 }
@@ -322,5 +329,13 @@ mod tests {
     #[test]
     fn quotes_t_sql_strings() {
         assert_eq!("can''t", quote_string("can't"));
+    }
+
+    #[test]
+    fn revert_error_mentions_reverting() {
+        let error = revert_execution_error(sqlx_core::Error::Protocol("boom".into()), 7);
+        let message = error.to_string();
+
+        assert!(message.contains("reverting migration 7"));
     }
 }
