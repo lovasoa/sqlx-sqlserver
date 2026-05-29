@@ -6,8 +6,8 @@ use super::packet::{encode_message, PacketFrameError, PacketType};
 use super::read::{read_len_prefixed, read_u32_le, read_u8};
 use super::return_value::ReturnValue;
 use super::row::Row;
-use super::token::{parse_env_change, parse_server_error, EnvChange, ServerError, TokenParseError};
-use crate::{MssqlColumn, MssqlQueryResult, MssqlRow, MssqlValue};
+use super::token::{parse_env_change, parse_server_error, EnvChange, TokenParseError};
+use crate::{error::server_error, MssqlColumn, MssqlQueryResult, MssqlRow, MssqlValue};
 
 const TOKEN_COL_METADATA: u8 = 0x81;
 const TOKEN_ERROR: u8 = 0xaa;
@@ -108,13 +108,6 @@ pub(crate) fn write_all_headers(out: &mut Vec<u8>, transaction_descriptor: u64) 
     out.extend_from_slice(&2_u16.to_le_bytes());
     out.extend_from_slice(&transaction_descriptor.to_le_bytes());
     out.extend_from_slice(&1_u32.to_le_bytes());
-}
-
-fn server_error(error: ServerError) -> Error {
-    Error::Protocol(format!(
-        "SQL Server error {} (state {}, class {}): {}",
-        error.number, error.state, error.class, error.message
-    ))
 }
 
 fn token_parse_error(error: TokenParseError) -> Error {
@@ -221,6 +214,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parses_error_token_as_database_error() {
+        let response = [error(208, 1, 16, "Invalid object name", "dbhost", "", 3)].concat();
+        let error = parse_query_response(&response).unwrap_err();
+        let db_error = error.as_database_error().unwrap();
+        let mssql_error = db_error
+            .as_error()
+            .downcast_ref::<crate::MssqlDatabaseError>()
+            .unwrap();
+
+        assert_eq!(208, mssql_error.number());
+        assert_eq!("Invalid object name", mssql_error.message());
+        assert_eq!("dbhost", mssql_error.server_name());
+        assert_eq!(3, mssql_error.line_number());
+    }
+
     fn col_metadata_int(name: &str) -> Vec<u8> {
         let mut out = Vec::new();
         out.push(TOKEN_COL_METADATA);
@@ -312,6 +321,31 @@ mod tests {
         out
     }
 
+    fn error(
+        number: i32,
+        state: u8,
+        class: u8,
+        message: &str,
+        server: &str,
+        procedure: &str,
+        line: u32,
+    ) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&number.to_le_bytes());
+        payload.push(state);
+        payload.push(class);
+        push_us_varchar(&mut payload, message);
+        push_b_varchar(&mut payload, server);
+        push_b_varchar(&mut payload, procedure);
+        payload.extend_from_slice(&line.to_le_bytes());
+
+        let mut out = Vec::new();
+        out.push(TOKEN_ERROR);
+        out.extend_from_slice(&u16::try_from(payload.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(&payload);
+        out
+    }
+
     fn done(status: u16, current_command: u16, row_count: u64) -> Vec<u8> {
         let mut out = Vec::new();
         out.push(TOKEN_DONE);
@@ -319,6 +353,17 @@ mod tests {
         out.extend_from_slice(&current_command.to_le_bytes());
         out.extend_from_slice(&row_count.to_le_bytes());
         out
+    }
+
+    fn push_us_varchar(out: &mut Vec<u8>, value: &str) {
+        out.extend_from_slice(
+            &u16::try_from(value.encode_utf16().count())
+                .unwrap()
+                .to_le_bytes(),
+        );
+        for unit in value.encode_utf16() {
+            out.extend_from_slice(&unit.to_le_bytes());
+        }
     }
 
     fn push_b_varchar(out: &mut Vec<u8>, value: &str) {

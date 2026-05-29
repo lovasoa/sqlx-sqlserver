@@ -31,6 +31,7 @@ mod arguments;
 mod column;
 mod connection;
 mod database;
+mod error;
 #[cfg(feature = "migrate")]
 mod migrate;
 /// Connection option parsing and configuration for SQL Server.
@@ -49,6 +50,7 @@ pub use arguments::MssqlArguments;
 pub use column::MssqlColumn;
 pub use connection::MssqlConnection;
 pub use database::Mssql;
+pub use error::MssqlDatabaseError;
 pub use options::{Encrypt, MssqlConnectOptions, MssqlInvalidOption};
 pub use query_result::MssqlQueryResult;
 pub use row::MssqlRow;

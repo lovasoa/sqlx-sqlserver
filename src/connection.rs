@@ -13,6 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_native_tls::TlsConnector;
 
+use crate::error::server_error;
 use crate::protocol::login::{build_login7_packet, Login7Error};
 use crate::protocol::packet::{PacketHeader, PacketStatus, PacketType, PACKET_HEADER_LEN};
 use crate::protocol::pre_login::{build_pre_login_packet, parse_server_encrypt, PreLoginError};
@@ -20,9 +21,7 @@ use crate::protocol::query::{build_sql_batch_packet, parse_query_response, Query
 use crate::protocol::rpc::{
     build_execute_sql_packet, build_prepare_packet, build_unprepare_packet,
 };
-use crate::protocol::token::{
-    parse_login_response, EnvChange, LoginResponse, ServerError, TokenParseError,
-};
+use crate::protocol::token::{parse_login_response, EnvChange, LoginResponse, TokenParseError};
 use crate::tls::TlsPreloginStream;
 use crate::{
     ssrp, Encrypt, Mssql, MssqlArguments, MssqlConnectOptions, MssqlQueryResult, MssqlRow,
@@ -596,13 +595,6 @@ fn build_tls_connector(options: &MssqlConnectOptions) -> Result<TlsConnector, Er
 
 fn taken_stream_error() -> Error {
     Error::Protocol("SQL Server stream was used while TLS upgrade was in progress".to_owned())
-}
-
-fn server_error(error: ServerError) -> Error {
-    Error::Protocol(format!(
-        "SQL Server error {} (state {}, class {}): {}",
-        error.number, error.state, error.class, error.message
-    ))
 }
 
 fn packet_error(error: crate::protocol::packet::PacketHeaderError) -> Error {
