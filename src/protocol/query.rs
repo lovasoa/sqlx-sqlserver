@@ -15,10 +15,17 @@ const TOKEN_DONEPROC: u8 = 0xfe;
 const TOKEN_DONEINPROC: u8 = 0xff;
 
 const DATA_TYPE_TINYINT: u8 = 0x30;
+const DATA_TYPE_BIT: u8 = 0x32;
 const DATA_TYPE_SMALLINT: u8 = 0x34;
 const DATA_TYPE_INT: u8 = 0x38;
+const DATA_TYPE_REAL: u8 = 0x3b;
+const DATA_TYPE_FLOAT: u8 = 0x3e;
 const DATA_TYPE_BIGINT: u8 = 0x7f;
 const DATA_TYPE_INTN: u8 = 0x26;
+const DATA_TYPE_BITN: u8 = 0x68;
+const DATA_TYPE_FLOATN: u8 = 0x6d;
+const DATA_TYPE_BIGVARBINARY: u8 = 0xa5;
+const DATA_TYPE_NVARCHAR: u8 = 0xe7;
 
 const DONE_COUNT: u16 = 0x0010;
 
@@ -83,7 +90,7 @@ pub(crate) fn parse_query_response(input: &[u8]) -> Result<QueryOutput, Error> {
     })
 }
 
-fn write_all_headers(out: &mut Vec<u8>, transaction_descriptor: u64) {
+pub(crate) fn write_all_headers(out: &mut Vec<u8>, transaction_descriptor: u64) {
     out.extend_from_slice(&22_u32.to_le_bytes());
     out.extend_from_slice(&18_u32.to_le_bytes());
     out.extend_from_slice(&2_u16.to_le_bytes());
@@ -115,20 +122,49 @@ fn parse_type_info(input: &mut &[u8]) -> Result<MssqlTypeInfo, Error> {
 
     Ok(match ty {
         DATA_TYPE_TINYINT => MssqlTypeInfo::TINYINT,
+        DATA_TYPE_BIT => MssqlTypeInfo::BIT,
         DATA_TYPE_SMALLINT => MssqlTypeInfo::SMALLINT,
         DATA_TYPE_INT => MssqlTypeInfo::INT,
+        DATA_TYPE_REAL => MssqlTypeInfo::REAL,
+        DATA_TYPE_FLOAT => MssqlTypeInfo::FLOAT,
         DATA_TYPE_BIGINT => MssqlTypeInfo::BIGINT,
         DATA_TYPE_INTN => match read_u8(input)? {
-            1 => MssqlTypeInfo::TINYINT,
-            2 => MssqlTypeInfo::SMALLINT,
-            4 => MssqlTypeInfo::INT,
-            8 => MssqlTypeInfo::BIGINT,
+            1 => MssqlTypeInfo::tds_variable(MssqlType::TinyInt, 1),
+            2 => MssqlTypeInfo::tds_variable(MssqlType::SmallInt, 2),
+            4 => MssqlTypeInfo::tds_variable(MssqlType::Int, 4),
+            8 => MssqlTypeInfo::tds_variable(MssqlType::BigInt, 8),
             size => {
                 return Err(Error::Protocol(format!(
                     "unsupported SQL Server INTN size {size}"
                 )));
             }
         },
+        DATA_TYPE_BITN => match read_u8(input)? {
+            1 => MssqlTypeInfo::tds_variable(MssqlType::Bit, 1),
+            size => {
+                return Err(Error::Protocol(format!(
+                    "unsupported SQL Server BITN size {size}"
+                )));
+            }
+        },
+        DATA_TYPE_FLOATN => match read_u8(input)? {
+            4 => MssqlTypeInfo::tds_variable(MssqlType::Real, 4),
+            8 => MssqlTypeInfo::tds_variable(MssqlType::Float, 8),
+            size => {
+                return Err(Error::Protocol(format!(
+                    "unsupported SQL Server FLOATN size {size}"
+                )));
+            }
+        },
+        DATA_TYPE_BIGVARBINARY => {
+            let size = read_u16_le(input)?;
+            MssqlTypeInfo::tds_variable(MssqlType::VarBinary, size)
+        }
+        DATA_TYPE_NVARCHAR => {
+            let size = read_u16_le(input)?;
+            let _collation = take(input, 5)?;
+            MssqlTypeInfo::tds_variable(MssqlType::NVarChar, size)
+        }
         other => MssqlTypeInfo::new(MssqlType::Other(format!("TDS_TYPE_0x{other:02x}"))),
     })
 }
@@ -137,30 +173,92 @@ fn parse_row(input: &mut &[u8], columns: &[MssqlColumn]) -> Result<MssqlRow, Err
     let mut values = Vec::with_capacity(columns.len());
 
     for column in columns {
-        let value = match column.type_info().kind() {
-            MssqlType::TinyInt => {
-                MssqlValue::new(column.type_info().clone(), Some(take(input, 1)?.to_vec()))
-            }
-            MssqlType::SmallInt => {
-                MssqlValue::new(column.type_info().clone(), Some(take(input, 2)?.to_vec()))
-            }
-            MssqlType::Int => {
-                MssqlValue::new(column.type_info().clone(), Some(take(input, 4)?.to_vec()))
-            }
-            MssqlType::BigInt => {
-                MssqlValue::new(column.type_info().clone(), Some(take(input, 8)?.to_vec()))
-            }
-            other => {
-                return Err(Error::Protocol(format!(
-                    "SQL Server row decoding does not support type {other:?}"
-                )));
-            }
+        let type_info = column.type_info();
+        let value = if type_info.is_variable_length() {
+            parse_variable_length_value(input, type_info)?
+        } else {
+            parse_fixed_length_value(input, type_info)?
         };
 
         values.push(value);
     }
 
     Ok(MssqlRow::new(columns.to_vec(), values))
+}
+
+fn parse_fixed_length_value(
+    input: &mut &[u8],
+    type_info: &MssqlTypeInfo,
+) -> Result<MssqlValue, Error> {
+    let len = match type_info.kind() {
+        MssqlType::Bit | MssqlType::TinyInt => 1,
+        MssqlType::SmallInt => 2,
+        MssqlType::Int | MssqlType::Real => 4,
+        MssqlType::BigInt | MssqlType::Float => 8,
+        other => {
+            return Err(Error::Protocol(format!(
+                "SQL Server row decoding does not support type {other:?}"
+            )));
+        }
+    };
+
+    Ok(MssqlValue::new(
+        type_info.clone(),
+        Some(take(input, len)?.to_vec()),
+    ))
+}
+
+fn parse_variable_length_value(
+    input: &mut &[u8],
+    type_info: &MssqlTypeInfo,
+) -> Result<MssqlValue, Error> {
+    match type_info.kind() {
+        MssqlType::Bit
+        | MssqlType::TinyInt
+        | MssqlType::SmallInt
+        | MssqlType::Int
+        | MssqlType::BigInt
+        | MssqlType::Real
+        | MssqlType::Float => {
+            let len = read_u8(input)?;
+            if len == 0 || len == u8::MAX {
+                Ok(MssqlValue::null(type_info.clone()))
+            } else {
+                validate_value_len(type_info, usize::from(len))?;
+                Ok(MssqlValue::new(
+                    type_info.clone(),
+                    Some(take(input, usize::from(len))?.to_vec()),
+                ))
+            }
+        }
+        MssqlType::NVarChar | MssqlType::VarBinary => {
+            let len = read_u16_le(input)?;
+            if len == u16::MAX {
+                Ok(MssqlValue::null(type_info.clone()))
+            } else {
+                validate_value_len(type_info, usize::from(len))?;
+                Ok(MssqlValue::new(
+                    type_info.clone(),
+                    Some(take(input, usize::from(len))?.to_vec()),
+                ))
+            }
+        }
+        other => Err(Error::Protocol(format!(
+            "SQL Server row decoding does not support variable-length type {other:?}"
+        ))),
+    }
+}
+
+fn validate_value_len(type_info: &MssqlTypeInfo, len: usize) -> Result<(), Error> {
+    if let Some(max_size) = type_info.max_size() {
+        if max_size != u16::MAX && len > usize::from(max_size) {
+            return Err(Error::Protocol(format!(
+                "SQL Server value length {len} exceeds declared type size {max_size}"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_done(input: &mut &[u8]) -> Result<Done, Error> {
@@ -272,6 +370,14 @@ mod tests {
         assert_eq!(1_i32, output.rows[0].try_get::<i32, _>(0).unwrap());
     }
 
+    #[test]
+    fn parses_variable_length_int_response() {
+        let response = [col_metadata_intn(""), row_intn(7), done(0x10, 0, 1)].concat();
+        let output = parse_query_response(&response).unwrap();
+
+        assert_eq!(7_i32, output.rows[0].try_get::<i32, _>(0).unwrap());
+    }
+
     fn col_metadata_int(name: &str) -> Vec<u8> {
         let mut out = Vec::new();
         out.push(TOKEN_COL_METADATA);
@@ -283,9 +389,29 @@ mod tests {
         out
     }
 
+    fn col_metadata_intn(name: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(TOKEN_COL_METADATA);
+        out.extend_from_slice(&1_u16.to_le_bytes());
+        out.extend_from_slice(&0_u32.to_le_bytes());
+        out.extend_from_slice(&0_u16.to_le_bytes());
+        out.push(DATA_TYPE_INTN);
+        out.push(4);
+        push_b_varchar(&mut out, name);
+        out
+    }
+
     fn row_int(value: i32) -> Vec<u8> {
         let mut out = Vec::new();
         out.push(TOKEN_ROW);
+        out.extend_from_slice(&value.to_le_bytes());
+        out
+    }
+
+    fn row_intn(value: i32) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(TOKEN_ROW);
+        out.push(4);
         out.extend_from_slice(&value.to_le_bytes());
         out
     }

@@ -33,17 +33,39 @@ pub enum MssqlType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MssqlTypeInfo {
     kind: MssqlType,
+    variable_length: bool,
+    size: Option<u16>,
 }
 
 impl MssqlTypeInfo {
     /// Creates type information from a known SQL Server type family.
     pub const fn new(kind: MssqlType) -> Self {
-        Self { kind }
+        Self {
+            kind,
+            variable_length: false,
+            size: None,
+        }
+    }
+
+    pub(crate) const fn tds_variable(kind: MssqlType, size: u16) -> Self {
+        Self {
+            kind,
+            variable_length: true,
+            size: Some(size),
+        }
     }
 
     /// Returns the known SQL Server type family.
     pub fn kind(&self) -> &MssqlType {
         &self.kind
+    }
+
+    pub(crate) const fn is_variable_length(&self) -> bool {
+        self.variable_length
+    }
+
+    pub(crate) const fn max_size(&self) -> Option<u16> {
+        self.size
     }
 
     /// SQL `NULL` type information.
@@ -90,7 +112,7 @@ impl TypeInfo for MssqlTypeInfo {
     }
 
     fn type_compatible(&self, other: &Self) -> bool {
-        self == other || self.is_null() || other.is_null()
+        self.kind == other.kind || self.is_null() || other.is_null()
     }
 }
 

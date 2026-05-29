@@ -1,9 +1,10 @@
 //! Independent Microsoft SQL Server driver crate for SQLx.
 //!
 //! This crate is intentionally outside the SQLx workspace and does not use
-//! local `path` dependencies. The current port starts with tested connection
-//! option parsing, small TDS protocol helpers, and a minimal SQLx-core database
-//! marker skeleton. Wire-level connections are not implemented yet.
+//! local `path` dependencies. The current port includes tested connection
+//! option parsing, PRELOGIN/LOGIN7 handshake support for unencrypted development
+//! servers, SQL batch execution, transaction batches, and RPC execution for
+//! stable scalar bind parameters.
 //!
 //! # Testing
 //!
@@ -67,3 +68,4 @@ pub trait MssqlExecutor<'c>: sqlx_core::executor::Executor<'c, Database = Mssql>
 impl<'c, T> MssqlExecutor<'c> for T where T: sqlx_core::executor::Executor<'c, Database = Mssql> {}
 
 sqlx_core::impl_into_arguments_for_arguments!(MssqlArguments);
+sqlx_core::impl_encode_for_option!(Mssql);

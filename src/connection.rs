@@ -13,6 +13,7 @@ use crate::protocol::login::{build_login7_packet, Login7Error};
 use crate::protocol::packet::{PacketHeader, PacketStatus, PacketType, PACKET_HEADER_LEN};
 use crate::protocol::pre_login::{build_pre_login_packet, parse_server_encrypt, PreLoginError};
 use crate::protocol::query::{build_sql_batch_packet, parse_query_response, QueryOutput};
+use crate::protocol::rpc::build_execute_sql_packet;
 use crate::protocol::token::{parse_login_response, LoginResponse, ServerError, TokenParseError};
 use crate::{
     ssrp, Encrypt, Mssql, MssqlArguments, MssqlConnectOptions, MssqlQueryResult, MssqlRow,
@@ -88,6 +89,30 @@ impl MssqlConnection {
         let packet = build_sql_batch_packet(sql, stream.packet_size, 0).map_err(frame_error)?;
         stream.write_all(&packet).await?;
 
+        self.read_query_response().await
+    }
+
+    pub(crate) async fn run_execute_sql(
+        &mut self,
+        sql: &str,
+        arguments: Option<&MssqlArguments>,
+    ) -> Result<QueryOutput, Error> {
+        match arguments {
+            Some(arguments) if !arguments.is_empty() => {
+                let stream = self.stream.as_mut().ok_or_else(wire_not_implemented)?;
+                let packet = build_execute_sql_packet(sql, arguments, stream.packet_size, 0)
+                    .map_err(|error| {
+                        Error::Protocol(format!("failed to encode SQL Server RPC: {error}"))
+                    })?;
+                stream.write_all(&packet).await?;
+                self.read_query_response().await
+            }
+            _ => self.run_sql_batch(sql).await,
+        }
+    }
+
+    async fn read_query_response(&mut self) -> Result<QueryOutput, Error> {
+        let stream = self.stream.as_mut().ok_or_else(wire_not_implemented)?;
         let response = stream.read_message().await?;
         if response.packet_type != PacketType::TABULAR_RESULT {
             return Err(Error::Protocol(format!(
@@ -164,8 +189,7 @@ impl<'c> Executor<'c> for &'c mut MssqlConnection {
 
         stream::once(async move {
             let arguments = arguments?;
-            reject_non_empty_arguments(arguments.as_ref())?;
-            self.run_sql_batch(sql.as_str()).await
+            self.run_execute_sql(sql.as_str(), arguments.as_ref()).await
         })
         .map(|result| match result {
             Ok(output) => stream_query_output(output),
@@ -190,9 +214,8 @@ impl<'c> Executor<'c> for &'c mut MssqlConnection {
 
         Box::pin(async move {
             let arguments = arguments?;
-            reject_non_empty_arguments(arguments.as_ref())?;
             Ok(self
-                .run_sql_batch(sql.as_str())
+                .run_execute_sql(sql.as_str(), arguments.as_ref())
                 .await?
                 .rows
                 .into_iter()
@@ -361,16 +384,6 @@ fn token_error(error: TokenParseError) -> Error {
 
 fn frame_error(error: crate::protocol::packet::PacketFrameError) -> Error {
     Error::Protocol(error.to_string())
-}
-
-fn reject_non_empty_arguments(arguments: Option<&MssqlArguments>) -> Result<(), Error> {
-    if arguments.is_some_and(|arguments| !arguments.is_empty()) {
-        return Err(Error::Protocol(
-            "SQL Server RPC execution for bound arguments is not implemented yet".to_owned(),
-        ));
-    }
-
-    Ok(())
 }
 
 fn stream_query_output(

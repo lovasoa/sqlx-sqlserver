@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use sqlx_core::decode::Decode;
+use sqlx_core::encode::{Encode, IsNull};
 use sqlx_core::error::BoxDynError;
 use sqlx_core::types::Type;
 use sqlx_core::value::{Value, ValueRef};
@@ -93,6 +94,13 @@ impl Type<Mssql> for i32 {
     }
 }
 
+impl Encode<'_, Mssql> for i32 {
+    fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
+        buf.extend_from_slice(&self.to_le_bytes());
+        Ok(IsNull::No)
+    }
+}
+
 impl Type<Mssql> for bool {
     fn type_info() -> MssqlTypeInfo {
         MssqlTypeInfo::BIT
@@ -100,6 +108,13 @@ impl Type<Mssql> for bool {
 
     fn compatible(ty: &MssqlTypeInfo) -> bool {
         matches!(ty.kind(), MssqlType::Bit)
+    }
+}
+
+impl Encode<'_, Mssql> for bool {
+    fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
+        buf.push(u8::from(*self));
+        Ok(IsNull::No)
     }
 }
 
@@ -124,6 +139,13 @@ impl Type<Mssql> for i16 {
 
     fn compatible(ty: &MssqlTypeInfo) -> bool {
         matches!(ty.kind(), MssqlType::TinyInt | MssqlType::SmallInt)
+    }
+}
+
+impl Encode<'_, Mssql> for i16 {
+    fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
+        buf.extend_from_slice(&self.to_le_bytes());
+        Ok(IsNull::No)
     }
 }
 
@@ -169,6 +191,13 @@ impl Type<Mssql> for i64 {
     }
 }
 
+impl Encode<'_, Mssql> for i64 {
+    fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
+        buf.extend_from_slice(&self.to_le_bytes());
+        Ok(IsNull::No)
+    }
+}
+
 impl Decode<'_, Mssql> for i64 {
     fn decode(value: MssqlValueRef<'_>) -> Result<Self, BoxDynError> {
         let bytes = value
@@ -196,6 +225,13 @@ impl Type<Mssql> for f32 {
 
     fn compatible(ty: &MssqlTypeInfo) -> bool {
         matches!(ty.kind(), MssqlType::Real)
+    }
+}
+
+impl Encode<'_, Mssql> for f32 {
+    fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
+        buf.extend_from_slice(&self.to_le_bytes());
+        Ok(IsNull::No)
     }
 }
 
@@ -235,13 +271,52 @@ impl Decode<'_, Mssql> for f64 {
     }
 }
 
-impl Type<Mssql> for String {
+impl Encode<'_, Mssql> for f64 {
+    fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
+        buf.extend_from_slice(&self.to_le_bytes());
+        Ok(IsNull::No)
+    }
+}
+
+impl Type<Mssql> for str {
     fn type_info() -> MssqlTypeInfo {
         MssqlTypeInfo::NVARCHAR
     }
 
     fn compatible(ty: &MssqlTypeInfo) -> bool {
         matches!(ty.kind(), MssqlType::NVarChar)
+    }
+}
+
+impl Type<Mssql> for String {
+    fn type_info() -> MssqlTypeInfo {
+        <str as Type<Mssql>>::type_info()
+    }
+
+    fn compatible(ty: &MssqlTypeInfo) -> bool {
+        <str as Type<Mssql>>::compatible(ty)
+    }
+}
+
+impl Encode<'_, Mssql> for str {
+    fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
+        for unit in self.encode_utf16() {
+            buf.extend_from_slice(&unit.to_le_bytes());
+        }
+
+        Ok(IsNull::No)
+    }
+}
+
+impl<'q> Encode<'q, Mssql> for &'q str {
+    fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
+        <str as Encode<Mssql>>::encode_by_ref(*self, buf)
+    }
+}
+
+impl Encode<'_, Mssql> for String {
+    fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
+        <str as Encode<Mssql>>::encode_by_ref(self.as_str(), buf)
     }
 }
 
@@ -263,13 +338,42 @@ impl Decode<'_, Mssql> for String {
     }
 }
 
-impl Type<Mssql> for Vec<u8> {
+impl Type<Mssql> for [u8] {
     fn type_info() -> MssqlTypeInfo {
         MssqlTypeInfo::VARBINARY
     }
 
     fn compatible(ty: &MssqlTypeInfo) -> bool {
         matches!(ty.kind(), MssqlType::VarBinary)
+    }
+}
+
+impl Type<Mssql> for Vec<u8> {
+    fn type_info() -> MssqlTypeInfo {
+        <[u8] as Type<Mssql>>::type_info()
+    }
+
+    fn compatible(ty: &MssqlTypeInfo) -> bool {
+        <[u8] as Type<Mssql>>::compatible(ty)
+    }
+}
+
+impl Encode<'_, Mssql> for [u8] {
+    fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
+        buf.extend_from_slice(self);
+        Ok(IsNull::No)
+    }
+}
+
+impl<'q> Encode<'q, Mssql> for &'q [u8] {
+    fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
+        <[u8] as Encode<Mssql>>::encode_by_ref(*self, buf)
+    }
+}
+
+impl Encode<'_, Mssql> for Vec<u8> {
+    fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
+        <[u8] as Encode<Mssql>>::encode_by_ref(self.as_slice(), buf)
     }
 }
 

@@ -1,12 +1,11 @@
 //! Runtime `Any` driver registration for SQL Server.
 //!
-//! The driver can be installed with SQLx `Any`. The current SQL Server port supports the same
-//! limited SQL batch execution path as the native connection and rejects bound arguments until RPC
-//! execution is ported.
+//! The driver can be installed with SQLx `Any`. The current SQL Server port supports SQL batch
+//! execution and the same stable scalar RPC argument types as the native connection.
 
 use crate::{
-    connection::wire_not_implemented, Mssql, MssqlColumn, MssqlConnectOptions, MssqlConnection,
-    MssqlQueryResult, MssqlTransactionManager, MssqlType, MssqlTypeInfo,
+    connection::wire_not_implemented, Mssql, MssqlArguments, MssqlColumn, MssqlConnectOptions,
+    MssqlConnection, MssqlQueryResult, MssqlTransactionManager, MssqlType, MssqlTypeInfo,
 };
 use futures_core::future::BoxFuture;
 use futures_core::stream::BoxStream;
@@ -14,7 +13,7 @@ use futures_util::{future, stream, FutureExt, StreamExt};
 use sqlx_core::any::driver::AnyDriver;
 use sqlx_core::any::{
     AnyArguments, AnyColumn, AnyConnectOptions, AnyConnectionBackend, AnyQueryResult, AnyRow,
-    AnyStatement, AnyTypeInfo, AnyTypeInfoKind,
+    AnyStatement, AnyTypeInfo, AnyTypeInfoKind, AnyValueKind,
 };
 use sqlx_core::arguments::Arguments;
 use sqlx_core::column::Column;
@@ -86,8 +85,12 @@ impl AnyConnectionBackend for MssqlConnection {
         arguments: Option<AnyArguments>,
     ) -> BoxStream<'_, sqlx_core::Result<Either<AnyQueryResult, AnyRow>>> {
         stream::once(async move {
-            reject_any_arguments(arguments.as_ref())?;
-            self.run_sql_batch(query.as_str()).await
+            let native_arguments = arguments
+                .map(convert_any_arguments)
+                .transpose()
+                .map_err(Error::Encode)?;
+            self.run_execute_sql(query.as_str(), native_arguments.as_ref())
+                .await
         })
         .map(|result| match result {
             Ok(output) => {
@@ -111,8 +114,11 @@ impl AnyConnectionBackend for MssqlConnection {
         arguments: Option<AnyArguments>,
     ) -> BoxFuture<'_, sqlx_core::Result<Option<AnyRow>>> {
         Box::pin(async move {
-            reject_any_arguments(arguments.as_ref())?;
-            self.run_sql_batch(query.as_str())
+            let native_arguments = arguments
+                .map(convert_any_arguments)
+                .transpose()
+                .map_err(Error::Encode)?;
+            self.run_execute_sql(query.as_str(), native_arguments.as_ref())
                 .await?
                 .rows
                 .into_iter()
@@ -134,14 +140,41 @@ impl AnyConnectionBackend for MssqlConnection {
     }
 }
 
-fn reject_any_arguments(arguments: Option<&AnyArguments>) -> Result<(), Error> {
-    if arguments.is_some_and(|arguments| arguments.len() > 0) {
-        return Err(Error::Protocol(
-            "SQL Server Any RPC execution for bound arguments is not implemented yet".to_owned(),
-        ));
+fn convert_any_arguments(
+    arguments: AnyArguments,
+) -> Result<MssqlArguments, sqlx_core::error::BoxDynError> {
+    let mut out = MssqlArguments::default();
+
+    for argument in arguments.values.0 {
+        match argument {
+            AnyValueKind::Null(AnyTypeInfoKind::Null) => out.add(Option::<i32>::None),
+            AnyValueKind::Null(AnyTypeInfoKind::Bool) => out.add(Option::<bool>::None),
+            AnyValueKind::Null(AnyTypeInfoKind::SmallInt) => out.add(Option::<i16>::None),
+            AnyValueKind::Null(AnyTypeInfoKind::Integer) => out.add(Option::<i32>::None),
+            AnyValueKind::Null(AnyTypeInfoKind::BigInt) => out.add(Option::<i64>::None),
+            AnyValueKind::Null(AnyTypeInfoKind::Real) => out.add(Option::<f32>::None),
+            AnyValueKind::Null(AnyTypeInfoKind::Double) => out.add(Option::<f64>::None),
+            AnyValueKind::Null(AnyTypeInfoKind::Text) => out.add(Option::<String>::None),
+            AnyValueKind::Null(AnyTypeInfoKind::Blob) => out.add(Option::<Vec<u8>>::None),
+            AnyValueKind::Bool(value) => out.add(value),
+            AnyValueKind::SmallInt(value) => out.add(value),
+            AnyValueKind::Integer(value) => out.add(value),
+            AnyValueKind::BigInt(value) => out.add(value),
+            AnyValueKind::Real(value) => out.add(value),
+            AnyValueKind::Double(value) => out.add(value),
+            AnyValueKind::Text(value) => out.add(value.as_str()),
+            AnyValueKind::TextSlice(value) => out.add(value.as_ref()),
+            AnyValueKind::Blob(value) => out.add(value.as_slice()),
+            other => {
+                return Err(format!(
+                    "SQL Server Any driver does not support argument value {other:?}"
+                )
+                .into());
+            }
+        }?;
     }
 
-    Ok(())
+    Ok(out)
 }
 
 fn map_result(result: MssqlQueryResult) -> AnyQueryResult {
