@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Independent Microsoft SQL Server driver crate for SQLx."
 repository = "https://github.com/lovasoa/sqlx-sqlserver"
-rust-version = "1.86.0"
+rust-version = "1.94.0"
 
 [features]
 default = []
