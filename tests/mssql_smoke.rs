@@ -117,6 +117,57 @@ async fn fetches_select_one_when_configured() -> Result<(), Box<dyn std::error::
 }
 
 #[cfg(feature = "integration-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn runs_independent_connections_in_parallel_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(url) = database_url() else {
+        eprintln!("skipping SQL Server async parallelism test: MSSQL_DATABASE_URL is not set");
+        return Ok(());
+    };
+
+    let mut tasks = Vec::new();
+
+    for expected in 0_i32..8 {
+        let url = url.clone();
+        tasks.push(tokio::spawn(async move {
+            let options = url.parse::<MssqlConnectOptions>().map_err(|error| {
+                format!("failed to parse MSSQL_DATABASE_URL for parallel task {expected}: {error}")
+            })?;
+            let mut conn = options.connect().await.map_err(|error| {
+                format!("failed to connect SQL Server parallel task {expected}: {error}")
+            })?;
+            let row = sqlx_core::query::query("SELECT @p1")
+                .bind(expected)
+                .fetch_one(&mut conn)
+                .await
+                .map_err(|error| format!("parallel SQL Server query {expected} failed: {error}"))?;
+            let actual = row.try_get::<i32, _>(0).map_err(|error| {
+                format!("parallel SQL Server decode {expected} failed: {error}")
+            })?;
+            conn.close().await.map_err(|error| {
+                format!("failed to close SQL Server parallel task {expected}: {error}")
+            })?;
+
+            if actual != expected {
+                return Err(format!(
+                    "parallel SQL Server task returned {actual}, expected {expected}"
+                ));
+            }
+
+            Ok::<(), String>(())
+        }));
+    }
+
+    for task in tasks {
+        if let Err(message) = task.await? {
+            return Err(std::io::Error::other(message).into());
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "integration-tests")]
 #[tokio::test]
 async fn fetches_bound_scalars_when_configured() -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = native_test_conn("SQL Server bound scalar test").await? else {

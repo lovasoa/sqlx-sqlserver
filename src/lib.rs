@@ -1,26 +1,70 @@
-//! Independent Microsoft SQL Server driver crate for SQLx.
+//! Microsoft SQL Server driver for SQLx.
 //!
-//! This crate is intentionally outside the SQLx workspace and does not use
-//! local `path` dependencies. The current port includes tested connection
-//! option parsing, PRELOGIN/LOGIN7 handshake support, TDS-wrapped TLS handshake
-//! support for encrypted SQL Server connections, SQL batch execution,
-//! transaction batches, and RPC execution for stable scalar bind parameters.
+//! `sqlx-sqlserver` is an independent split driver crate. Use it directly with
+//! `sqlx-core` native APIs, or install its [`Any` driver][any::DRIVER] when an
+//! application wants to open SQL Server URLs through `AnyConnection`.
 //!
-//! # Testing
+//! # Native connection
 //!
-//! Fast tests do not require SQL Server:
+//! ```no_run
+//! use sqlx_core::connection::{ConnectOptions, Connection};
+//! use sqlx_core::row::Row;
+//! use sqlx_sqlserver::MssqlConnectOptions;
 //!
-//! ```text
-//! cargo test
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut conn = "mssql://sa:Password123!@localhost:1433/master?encrypt=mandatory&trust_server_certificate=true"
+//!     .parse::<MssqlConnectOptions>()?
+//!     .connect()
+//!     .await?;
+//!
+//! let row = sqlx_core::query::query("SELECT 1")
+//!     .fetch_one(&mut conn)
+//!     .await?;
+//!
+//! let value: i32 = row.try_get(0)?;
+//! assert_eq!(value, 1);
+//!
+//! conn.close().await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
-//! Integration tests require `MSSQL_DATABASE_URL` and skip cleanly when it is
-//! absent:
+//! # `AnyConnection`
 //!
-//! ```text
-//! MSSQL_DATABASE_URL='mssql://sa:Password123!@localhost:1433/master?encrypt=mandatory&trust_server_certificate=true' \
-//! cargo test --features integration-tests --test mssql_smoke
+//! Install this driver before connecting through SQLx `Any` APIs:
+//!
+//! ```no_run
+//! use sqlx_core::connection::Connection;
+//!
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! sqlx_core::any::driver::install_drivers(&[sqlx_sqlserver::any::DRIVER])?;
+//!
+//! let mut conn = sqlx_core::any::AnyConnection::connect(
+//!     "mssql://sa:Password123!@localhost:1433/master?encrypt=mandatory&trust_server_certificate=true",
+//! )
+//! .await?;
+//!
+//! conn.close().await?;
+//! # Ok(())
+//! # }
 //! ```
+//!
+//! To combine split drivers, install all of them once at application startup:
+//!
+//! ```no_run
+//! # fn install() -> Result<(), Box<dyn std::error::Error>> {
+//! sqlx_core::any::driver::install_drivers(&[
+//!     sqlx_sqlserver::any::DRIVER,
+//!     sqlx_odbc::any::DRIVER,
+//! ])?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The examples use `trust_server_certificate=true` for local development with
+//! SQL Server's self-signed container certificate. Production deployments should
+//! prefer a trusted certificate and, when needed, `hostname_in_certificate` or
+//! `ssl_root_cert` in [`MssqlConnectOptions`].
 
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
