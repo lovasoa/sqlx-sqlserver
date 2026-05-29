@@ -138,6 +138,35 @@ async fn fetches_bound_scalars_when_configured() -> Result<(), Box<dyn std::erro
 
 #[cfg(feature = "integration-tests")]
 #[tokio::test]
+async fn fetches_bound_large_text_and_binary_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = native_test_conn("SQL Server large parameter test").await? else {
+        return Ok(());
+    };
+
+    let text = "x".repeat(4001);
+    let row = sqlx_core::query::query("SELECT LEN(@p1), DATALENGTH(@p1)")
+        .bind(text.as_str())
+        .fetch_one(&mut conn)
+        .await?;
+
+    assert_eq!(4001_i32, row.try_get::<i32, _>(0)?);
+    assert_eq!(8002_i32, row.try_get::<i32, _>(1)?);
+
+    let bytes = vec![0x5a; 8001];
+    let row = sqlx_core::query::query("SELECT DATALENGTH(@p1)")
+        .bind(bytes.as_slice())
+        .fetch_one(&mut conn)
+        .await?;
+
+    assert_eq!(8001_i32, row.try_get::<i32, _>(0)?);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[cfg(feature = "integration-tests")]
+#[tokio::test]
 async fn fetches_varchar_text_when_configured() -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = native_test_conn("SQL Server varchar decode test").await? else {
         return Ok(());

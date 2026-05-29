@@ -140,8 +140,8 @@ pub struct PacketMessage {
 /// Encodes a message payload into one or more TDS packets.
 ///
 /// `packet_size` is the maximum packet length including the 8-byte header. The
-/// helper emits packet IDs starting at zero and sets `END_OF_MESSAGE` only on
-/// the final packet.
+/// helper emits client packet IDs starting at one and sets
+/// `END_OF_MESSAGE` only on the final packet.
 pub fn encode_message(
     packet_type: PacketType,
     payload: &[u8],
@@ -168,7 +168,7 @@ pub fn encode_message(
         .ok_or(PacketFrameError::MessageTooLarge)?;
 
     let mut out = Vec::with_capacity(total_len);
-    let mut packet_id = 0u8;
+    let mut packet_id = 1u8;
 
     if payload.is_empty() {
         let header = PacketHeader::new(
@@ -353,17 +353,17 @@ mod tests {
     fn encodes_empty_message_as_end_packet() {
         let bytes = encode_message(PacketType::SQL_BATCH, &[], 512).unwrap();
 
-        assert_eq!(vec![0x01, 0x01, 0x00, 0x08, 0, 0, 0, 0], bytes);
+        assert_eq!(vec![0x01, 0x01, 0x00, 0x08, 0, 0, 1, 0], bytes);
     }
 
     #[test]
-    fn encodes_message_across_packet_boundaries() {
+    fn encodes_client_message_across_packet_boundaries_from_packet_id_one() {
         let bytes = encode_message(PacketType::PRE_LOGIN, b"abcdefghi", 12).unwrap();
 
         assert_eq!(
             vec![
-                0x12, 0x00, 0x00, 0x0c, 0, 0, 0, 0, b'a', b'b', b'c', b'd', 0x12, 0x00, 0x00, 0x0c,
-                0, 0, 1, 0, b'e', b'f', b'g', b'h', 0x12, 0x01, 0x00, 0x09, 0, 0, 2, 0, b'i',
+                0x12, 0x00, 0x00, 0x0c, 0, 0, 1, 0, b'a', b'b', b'c', b'd', 0x12, 0x00, 0x00, 0x0c,
+                0, 0, 2, 0, b'e', b'f', b'g', b'h', 0x12, 0x01, 0x00, 0x09, 0, 0, 3, 0, b'i',
             ],
             bytes
         );
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn decodes_multi_packet_message_payload() {
-        let bytes = encode_message(PacketType::PRE_LOGIN, b"abcdefghi", 12).unwrap();
+        let bytes = contiguous_packet_id_message();
         let message = try_decode_message(&bytes).unwrap().unwrap();
 
         assert_eq!(PacketType::PRE_LOGIN, message.packet_type);
@@ -403,21 +403,21 @@ mod tests {
 
     #[test]
     fn waits_for_complete_packet() {
-        let bytes = encode_message(PacketType::PRE_LOGIN, b"abcdefghi", 12).unwrap();
+        let bytes = contiguous_packet_id_message();
 
         assert_eq!(None, try_decode_message(&bytes[..15]).unwrap());
     }
 
     #[test]
     fn waits_for_end_of_message_packet() {
-        let bytes = encode_message(PacketType::PRE_LOGIN, b"abcdefghi", 12).unwrap();
+        let bytes = contiguous_packet_id_message();
 
         assert_eq!(None, try_decode_message(&bytes[..12]).unwrap());
     }
 
     #[test]
     fn rejects_mismatched_packet_types() {
-        let mut bytes = encode_message(PacketType::PRE_LOGIN, b"abcdefghi", 12).unwrap();
+        let mut bytes = contiguous_packet_id_message();
         bytes[12] = PacketType::SQL_BATCH.code();
 
         let err = try_decode_message(&bytes).unwrap_err();
@@ -433,17 +433,24 @@ mod tests {
 
     #[test]
     fn rejects_non_contiguous_packet_ids() {
-        let mut bytes = encode_message(PacketType::PRE_LOGIN, b"abcdefghi", 12).unwrap();
+        let mut bytes = contiguous_packet_id_message();
         bytes[18] = 5;
 
         let err = try_decode_message(&bytes).unwrap_err();
 
         assert_eq!(
             PacketFrameError::UnexpectedPacketId {
-                expected: 1,
+                expected: 2,
                 actual: 5,
             },
             err
         );
+    }
+
+    fn contiguous_packet_id_message() -> Vec<u8> {
+        vec![
+            0x12, 0x00, 0x00, 0x0c, 0, 0, 1, 0, b'a', b'b', b'c', b'd', 0x12, 0x00, 0x00, 0x0c, 0,
+            0, 2, 0, b'e', b'f', b'g', b'h', 0x12, 0x01, 0x00, 0x09, 0, 0, 3, 0, b'i',
+        ]
     }
 }

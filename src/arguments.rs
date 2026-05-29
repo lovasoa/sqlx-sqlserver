@@ -14,6 +14,8 @@ const DATA_TYPE_BIGVARBINARY: u8 = 0xa5;
 const DATA_TYPE_BIGVARCHAR: u8 = 0xa7;
 const DATA_TYPE_NVARCHAR: u8 = 0xe7;
 const DEFAULT_COLLATION: [u8; 5] = [0x81, 0x04, 0xd0, 0x00, 0x34];
+const PLP_NULL: u64 = 0xffff_ffff_ffff_ffff;
+const PLP_CHUNK_SIZE: usize = 8192;
 const STATUS_BY_REF_VALUE: u8 = 0x01;
 
 /// SQL Server argument buffer.
@@ -197,17 +199,23 @@ fn write_type_info(
         }
         MssqlType::NVarChar => {
             out.push(DATA_TYPE_NVARCHAR);
-            out.extend_from_slice(&nvarchar_type_size(encoded_len, is_null)?.to_le_bytes());
+            out.extend_from_slice(
+                &nvarchar_type_size(type_info, encoded_len, is_null)?.to_le_bytes(),
+            );
             out.extend_from_slice(&DEFAULT_COLLATION);
         }
         MssqlType::VarChar => {
             out.push(DATA_TYPE_BIGVARCHAR);
-            out.extend_from_slice(&bounded_short_len(encoded_len, is_null)?.to_le_bytes());
+            out.extend_from_slice(
+                &bounded_short_len(type_info, encoded_len, is_null)?.to_le_bytes(),
+            );
             out.extend_from_slice(&DEFAULT_COLLATION);
         }
         MssqlType::VarBinary => {
             out.push(DATA_TYPE_BIGVARBINARY);
-            out.extend_from_slice(&bounded_short_len(encoded_len, is_null)?.to_le_bytes());
+            out.extend_from_slice(
+                &bounded_short_len(type_info, encoded_len, is_null)?.to_le_bytes(),
+            );
         }
         other => return Err(format!("SQL Server arguments do not support type {other:?}").into()),
     }
@@ -236,17 +244,21 @@ fn write_param_len_data(
             });
         }
         MssqlType::NVarChar | MssqlType::VarChar | MssqlType::VarBinary => {
-            let len = if is_null {
-                u16::MAX
+            if type_info.size() == Some(u16::MAX) {
+                write_plp_value(out, encoded, is_null)?;
             } else {
-                u16::try_from(encoded.len())?
-            };
-            out.extend_from_slice(&len.to_le_bytes());
+                let len = if is_null {
+                    u16::MAX
+                } else {
+                    u16::try_from(encoded.len())?
+                };
+                out.extend_from_slice(&len.to_le_bytes());
+            }
         }
         other => return Err(format!("SQL Server arguments do not support type {other:?}").into()),
     }
 
-    if !is_null {
+    if !is_null && type_info.size() != Some(u16::MAX) {
         out.extend_from_slice(encoded);
     }
 
@@ -266,18 +278,61 @@ fn declaration(
         MssqlType::BigInt => "bigint".to_owned(),
         MssqlType::Real => "real".to_owned(),
         MssqlType::Float => "float".to_owned(),
-        MssqlType::NVarChar => format!("nvarchar({})", nvarchar_chars(encoded_len, is_null)?),
-        MssqlType::VarChar => format!("varchar({})", bounded_short_len(encoded_len, is_null)?),
-        MssqlType::VarBinary => format!("varbinary({})", bounded_short_len(encoded_len, is_null)?),
+        MssqlType::NVarChar => nvarchar_declaration(type_info, encoded_len, is_null)?,
+        MssqlType::VarChar => varchar_declaration(type_info, encoded_len, is_null)?,
+        MssqlType::VarBinary => varbinary_declaration(type_info, encoded_len, is_null)?,
         other => return Err(format!("SQL Server arguments do not support type {other:?}").into()),
     })
 }
 
-fn nvarchar_chars(encoded_len: usize, is_null: bool) -> Result<u16, BoxDynError> {
-    Ok(nvarchar_type_size(encoded_len, is_null)? / 2)
+fn nvarchar_declaration(
+    type_info: &MssqlTypeInfo,
+    encoded_len: usize,
+    is_null: bool,
+) -> Result<String, BoxDynError> {
+    let size = nvarchar_type_size(type_info, encoded_len, is_null)?;
+    if size == u16::MAX {
+        Ok("nvarchar(max)".to_owned())
+    } else {
+        Ok(format!("nvarchar({})", size / 2))
+    }
 }
 
-fn nvarchar_type_size(encoded_len: usize, is_null: bool) -> Result<u16, BoxDynError> {
+fn varchar_declaration(
+    type_info: &MssqlTypeInfo,
+    encoded_len: usize,
+    is_null: bool,
+) -> Result<String, BoxDynError> {
+    let size = bounded_short_len(type_info, encoded_len, is_null)?;
+    if size == u16::MAX {
+        Ok("varchar(max)".to_owned())
+    } else {
+        Ok(format!("varchar({size})"))
+    }
+}
+
+fn varbinary_declaration(
+    type_info: &MssqlTypeInfo,
+    encoded_len: usize,
+    is_null: bool,
+) -> Result<String, BoxDynError> {
+    let size = bounded_short_len(type_info, encoded_len, is_null)?;
+    if size == u16::MAX {
+        Ok("varbinary(max)".to_owned())
+    } else {
+        Ok(format!("varbinary({size})"))
+    }
+}
+
+fn nvarchar_type_size(
+    type_info: &MssqlTypeInfo,
+    encoded_len: usize,
+    is_null: bool,
+) -> Result<u16, BoxDynError> {
+    if let Some(size) = type_info.size() {
+        return Ok(size);
+    }
+
     let len = if is_null {
         2
     } else {
@@ -286,13 +341,38 @@ fn nvarchar_type_size(encoded_len: usize, is_null: bool) -> Result<u16, BoxDynEr
     Ok(u16::try_from(len)?)
 }
 
-fn bounded_short_len(encoded_len: usize, is_null: bool) -> Result<u16, BoxDynError> {
+fn bounded_short_len(
+    type_info: &MssqlTypeInfo,
+    encoded_len: usize,
+    is_null: bool,
+) -> Result<u16, BoxDynError> {
+    if let Some(size) = type_info.size() {
+        return Ok(size);
+    }
+
     let len = if is_null {
         1
     } else {
         std::cmp::max(1, encoded_len)
     };
     Ok(u16::try_from(len)?)
+}
+
+fn write_plp_value(out: &mut Vec<u8>, encoded: &[u8], is_null: bool) -> Result<(), BoxDynError> {
+    if is_null {
+        out.extend_from_slice(&PLP_NULL.to_le_bytes());
+        return Ok(());
+    }
+
+    out.extend_from_slice(&u64::try_from(encoded.len())?.to_le_bytes());
+
+    for chunk in encoded.chunks(PLP_CHUNK_SIZE) {
+        out.extend_from_slice(&u32::try_from(chunk.len())?.to_le_bytes());
+        out.extend_from_slice(chunk);
+    }
+
+    out.extend_from_slice(&0_u32.to_le_bytes());
+    Ok(())
 }
 
 fn write_b_varchar(out: &mut Vec<u8>, value: &str) -> Result<(), BoxDynError> {
@@ -365,5 +445,33 @@ mod tests {
             .data()
             .windows(2)
             .any(|bytes| bytes == [DATA_TYPE_INTN, 8]));
+    }
+
+    #[test]
+    fn declares_large_text_and_binary_parameters_as_max() {
+        let mut args = MssqlArguments::default();
+        let text = "x".repeat(4001);
+        let bytes = vec![0x5a; 8001];
+
+        args.add(text.as_str()).unwrap();
+        args.add(bytes.as_slice()).unwrap();
+
+        assert_eq!("@p1 nvarchar(max),@p2 varbinary(max)", args.declarations());
+        assert!(args
+            .data()
+            .windows(3)
+            .any(|bytes| bytes == [DATA_TYPE_NVARCHAR, 0xff, 0xff]));
+        assert!(args
+            .data()
+            .windows(3)
+            .any(|bytes| bytes == [DATA_TYPE_BIGVARBINARY, 0xff, 0xff]));
+        assert!(args
+            .data()
+            .windows(8)
+            .any(|bytes| bytes == 8002_u64.to_le_bytes()));
+        assert!(args
+            .data()
+            .windows(8)
+            .any(|bytes| bytes == 8001_u64.to_le_bytes()));
     }
 }

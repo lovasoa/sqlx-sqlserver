@@ -391,6 +391,13 @@ impl Type<Mssql> for String {
 }
 
 impl Encode<'_, Mssql> for str {
+    fn produces(&self) -> Option<MssqlTypeInfo> {
+        Some(MssqlTypeInfo::with_size(
+            MssqlType::NVarChar,
+            nvarchar_parameter_size(self),
+        ))
+    }
+
     fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
         for unit in self.encode_utf16() {
             buf.extend_from_slice(&unit.to_le_bytes());
@@ -401,12 +408,20 @@ impl Encode<'_, Mssql> for str {
 }
 
 impl<'q> Encode<'q, Mssql> for &'q str {
+    fn produces(&self) -> Option<MssqlTypeInfo> {
+        <str as Encode<Mssql>>::produces(*self)
+    }
+
     fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
         <str as Encode<Mssql>>::encode_by_ref(*self, buf)
     }
 }
 
 impl Encode<'_, Mssql> for String {
+    fn produces(&self) -> Option<MssqlTypeInfo> {
+        <str as Encode<Mssql>>::produces(self.as_str())
+    }
+
     fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
         <str as Encode<Mssql>>::encode_by_ref(self.as_str(), buf)
     }
@@ -455,6 +470,13 @@ impl Type<Mssql> for Vec<u8> {
 }
 
 impl Encode<'_, Mssql> for [u8] {
+    fn produces(&self) -> Option<MssqlTypeInfo> {
+        Some(MssqlTypeInfo::with_size(
+            MssqlType::VarBinary,
+            varbinary_parameter_size(self.len()),
+        ))
+    }
+
     fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
         buf.extend_from_slice(self);
         Ok(IsNull::No)
@@ -462,12 +484,20 @@ impl Encode<'_, Mssql> for [u8] {
 }
 
 impl<'q> Encode<'q, Mssql> for &'q [u8] {
+    fn produces(&self) -> Option<MssqlTypeInfo> {
+        <[u8] as Encode<Mssql>>::produces(*self)
+    }
+
     fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
         <[u8] as Encode<Mssql>>::encode_by_ref(*self, buf)
     }
 }
 
 impl Encode<'_, Mssql> for Vec<u8> {
+    fn produces(&self) -> Option<MssqlTypeInfo> {
+        <[u8] as Encode<Mssql>>::produces(self.as_slice())
+    }
+
     fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
         <[u8] as Encode<Mssql>>::encode_by_ref(self.as_slice(), buf)
     }
@@ -482,6 +512,23 @@ impl Decode<'_, Mssql> for Vec<u8> {
 impl<'r> Decode<'r, Mssql> for &'r [u8] {
     fn decode(value: MssqlValueRef<'r>) -> Result<Self, BoxDynError> {
         non_null_bytes(value, "bytes")
+    }
+}
+
+fn nvarchar_parameter_size(value: &str) -> u16 {
+    let bytes = value.encode_utf16().count().saturating_mul(2);
+    if bytes > 8000 {
+        u16::MAX
+    } else {
+        u16::try_from(std::cmp::max(2, bytes)).unwrap_or(u16::MAX)
+    }
+}
+
+fn varbinary_parameter_size(len: usize) -> u16 {
+    if len > 8000 {
+        u16::MAX
+    } else {
+        u16::try_from(std::cmp::max(1, len)).unwrap_or(u16::MAX)
     }
 }
 

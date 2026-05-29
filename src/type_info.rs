@@ -53,9 +53,22 @@ impl MssqlTypeInfo {
         }
     }
 
+    pub(crate) const fn with_size(kind: MssqlType, size: u16) -> Self {
+        Self {
+            kind,
+            variable_length: true,
+            size: Some(size),
+            protocol_type_info: None,
+        }
+    }
+
     /// Returns the known SQL Server type family.
     pub fn kind(&self) -> &MssqlType {
         &self.kind
+    }
+
+    pub(crate) const fn size(&self) -> Option<u16> {
+        self.size
     }
 
     pub(crate) const fn protocol_type_info(&self) -> Option<&protocol::TypeInfo> {
