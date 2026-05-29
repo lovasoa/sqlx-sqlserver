@@ -71,6 +71,18 @@ impl MssqlConnection {
         self.transaction_depth
     }
 
+    pub(crate) fn increment_transaction_depth(&mut self) {
+        self.transaction_depth += 1;
+    }
+
+    pub(crate) fn decrement_transaction_depth(&mut self) {
+        self.transaction_depth = self.transaction_depth.saturating_sub(1);
+    }
+
+    pub(crate) fn clear_transaction_depth(&mut self) {
+        self.transaction_depth = 0;
+    }
+
     pub(crate) async fn run_sql_batch(&mut self, sql: &str) -> Result<QueryOutput, Error> {
         let stream = self.stream.as_mut().ok_or_else(wire_not_implemented)?;
         let packet = build_sql_batch_packet(sql, stream.packet_size, 0).map_err(frame_error)?;

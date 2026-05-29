@@ -80,6 +80,23 @@ async fn fetches_select_one_when_configured() -> Result<(), Box<dyn std::error::
 
 #[cfg(feature = "integration-tests")]
 #[tokio::test]
+async fn rolls_back_transaction_when_configured() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(url) = database_url() else {
+        eprintln!("skipping SQL Server transaction test: MSSQL_DATABASE_URL is not set");
+        return Ok(());
+    };
+
+    let options = url.parse::<MssqlConnectOptions>()?;
+    let mut conn = options.connect().await?;
+    let tx = conn.begin().await?;
+    tx.rollback().await?;
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[cfg(feature = "integration-tests")]
+#[tokio::test]
 async fn any_fetches_select_one_when_configured() -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = any_test_conn("SQL Server Any query test").await? else {
         return Ok(());
