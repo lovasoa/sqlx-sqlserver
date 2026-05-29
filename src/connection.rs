@@ -1,14 +1,23 @@
+use futures_core::future::BoxFuture;
+use futures_core::stream::BoxStream;
+use futures_util::{future, stream, StreamExt};
 use sqlx_core::connection::Connection;
 use sqlx_core::error::Error;
+use sqlx_core::executor::{Execute, Executor};
 use sqlx_core::transaction::Transaction;
+use sqlx_core::Either;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::protocol::login::{build_login7_packet, Login7Error};
 use crate::protocol::packet::{PacketHeader, PacketStatus, PacketType, PACKET_HEADER_LEN};
 use crate::protocol::pre_login::{build_pre_login_packet, parse_server_encrypt, PreLoginError};
+use crate::protocol::query::{build_sql_batch_packet, parse_query_response, QueryOutput};
 use crate::protocol::token::{parse_login_response, LoginResponse, ServerError, TokenParseError};
-use crate::{ssrp, Encrypt, Mssql, MssqlConnectOptions};
+use crate::{
+    ssrp, Encrypt, Mssql, MssqlArguments, MssqlConnectOptions, MssqlQueryResult, MssqlRow,
+    MssqlStatement,
+};
 
 /// SQL Server connection.
 #[derive(Debug)]
@@ -61,6 +70,22 @@ impl MssqlConnection {
     pub const fn transaction_depth(&self) -> usize {
         self.transaction_depth
     }
+
+    pub(crate) async fn run_sql_batch(&mut self, sql: &str) -> Result<QueryOutput, Error> {
+        let stream = self.stream.as_mut().ok_or_else(wire_not_implemented)?;
+        let packet = build_sql_batch_packet(sql, stream.packet_size, 0).map_err(frame_error)?;
+        stream.write_all(&packet).await?;
+
+        let response = stream.read_message().await?;
+        if response.packet_type != PacketType::TABULAR_RESULT {
+            return Err(Error::Protocol(format!(
+                "expected SQL Server query response as tabular result, got packet type 0x{:02x}",
+                response.packet_type.code()
+            )));
+        }
+
+        parse_query_response(&response.payload)
+    }
 }
 
 impl Connection for MssqlConnection {
@@ -106,6 +131,72 @@ impl Connection for MssqlConnection {
 
     fn should_flush(&self) -> bool {
         false
+    }
+}
+
+impl<'c> Executor<'c> for &'c mut MssqlConnection {
+    type Database = Mssql;
+
+    fn fetch_many<'e, 'q, E>(
+        self,
+        mut query: E,
+    ) -> BoxStream<'e, Result<Either<MssqlQueryResult, MssqlRow>, Error>>
+    where
+        'c: 'e,
+        E: Execute<'q, Self::Database>,
+        'q: 'e,
+        E: 'q,
+    {
+        let arguments = query.take_arguments().map_err(Error::Encode);
+        let sql = query.sql();
+
+        stream::once(async move {
+            let arguments = arguments?;
+            reject_non_empty_arguments(arguments.as_ref())?;
+            self.run_sql_batch(sql.as_str()).await
+        })
+        .map(|result| match result {
+            Ok(output) => stream_query_output(output),
+            Err(error) => stream::once(future::ready(Err(error))).boxed(),
+        })
+        .flatten()
+        .boxed()
+    }
+
+    fn fetch_optional<'e, 'q, E>(
+        self,
+        mut query: E,
+    ) -> BoxFuture<'e, Result<Option<MssqlRow>, Error>>
+    where
+        'c: 'e,
+        E: Execute<'q, Self::Database>,
+        'q: 'e,
+        E: 'q,
+    {
+        let arguments = query.take_arguments().map_err(Error::Encode);
+        let sql = query.sql();
+
+        Box::pin(async move {
+            let arguments = arguments?;
+            reject_non_empty_arguments(arguments.as_ref())?;
+            Ok(self
+                .run_sql_batch(sql.as_str())
+                .await?
+                .rows
+                .into_iter()
+                .next())
+        })
+    }
+
+    fn prepare_with<'e>(
+        self,
+        _sql: sqlx_core::sql_str::SqlStr,
+        _parameters: &'e [crate::MssqlTypeInfo],
+    ) -> BoxFuture<'e, Result<MssqlStatement, Error>>
+    where
+        'c: 'e,
+    {
+        Box::pin(future::ready(Err(wire_not_implemented())))
     }
 }
 
@@ -254,4 +345,31 @@ fn login_error(error: Login7Error) -> Error {
 
 fn token_error(error: TokenParseError) -> Error {
     Error::Protocol(error.to_string())
+}
+
+fn frame_error(error: crate::protocol::packet::PacketFrameError) -> Error {
+    Error::Protocol(error.to_string())
+}
+
+fn reject_non_empty_arguments(arguments: Option<&MssqlArguments>) -> Result<(), Error> {
+    if arguments.is_some_and(|arguments| !arguments.is_empty()) {
+        return Err(Error::Protocol(
+            "SQL Server RPC execution for bound arguments is not implemented yet".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn stream_query_output(
+    output: QueryOutput,
+) -> BoxStream<'static, Result<Either<MssqlQueryResult, MssqlRow>, Error>> {
+    stream::iter(
+        output
+            .rows
+            .into_iter()
+            .map(|row| Ok(Either::Right(row)))
+            .chain(std::iter::once(Ok(Either::Left(output.result)))),
+    )
+    .boxed()
 }

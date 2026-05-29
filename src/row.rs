@@ -1,19 +1,25 @@
 use sqlx_core::column::{Column, ColumnIndex};
 use sqlx_core::error::Error;
 use sqlx_core::row::Row;
+use sqlx_core::value::Value;
 
-use crate::{Mssql, MssqlColumn, MssqlValueRef};
+use crate::{Mssql, MssqlColumn, MssqlValue, MssqlValueRef};
 
 /// SQL Server row skeleton.
 #[derive(Debug, Default, Clone)]
 pub struct MssqlRow {
     columns: Vec<MssqlColumn>,
+    values: Vec<MssqlValue>,
 }
 
 impl MssqlRow {
     /// Creates an empty row skeleton.
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn new(columns: Vec<MssqlColumn>, values: Vec<MssqlValue>) -> Self {
+        Self { columns, values }
     }
 }
 
@@ -29,10 +35,7 @@ impl Row for MssqlRow {
         I: ColumnIndex<Self>,
     {
         let index = index.index(self)?;
-        Err(Error::ColumnDecode {
-            index: index.to_string(),
-            source: "SQL Server row decoding is not implemented yet".into(),
-        })
+        Ok(self.values[index].as_ref())
     }
 }
 

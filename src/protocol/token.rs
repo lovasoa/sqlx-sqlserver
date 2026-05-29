@@ -183,6 +183,10 @@ fn parse_login_ack(mut input: &[u8]) -> Result<LoginAck, TokenParseError> {
     })
 }
 
+pub(crate) fn parse_server_error(input: &[u8]) -> Result<ServerError, TokenParseError> {
+    parse_error(input)
+}
+
 fn parse_error(mut input: &[u8]) -> Result<ServerError, TokenParseError> {
     let number = read_i32_le(&mut input)?;
     let state = read_u8(&mut input)?;

@@ -6,5 +6,6 @@ pub mod login;
 pub mod packet;
 /// PRELOGIN packet construction and parsing helpers.
 pub mod pre_login;
+pub(crate) mod query;
 /// Bounded tabular-result token parsing helpers.
 pub mod token;
