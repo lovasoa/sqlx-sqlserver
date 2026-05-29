@@ -3,7 +3,7 @@ use sqlx_core::Error;
 use super::col_meta_data::ColMetaData;
 use super::done::{Done, Status};
 use super::packet::{encode_message, PacketFrameError, PacketType};
-use super::read::{read_len_prefixed, read_u8};
+use super::read::{read_len_prefixed, read_u32_le, read_u8};
 use super::return_value::ReturnValue;
 use super::row::Row;
 use super::token::{parse_env_change, parse_server_error, EnvChange, ServerError, TokenParseError};
@@ -12,6 +12,7 @@ use crate::{MssqlColumn, MssqlQueryResult, MssqlRow, MssqlValue};
 const TOKEN_COL_METADATA: u8 = 0x81;
 const TOKEN_ERROR: u8 = 0xaa;
 const TOKEN_INFO: u8 = 0xab;
+const TOKEN_RETURN_STATUS: u8 = 0x79;
 const TOKEN_RETURN_VALUE: u8 = 0xac;
 const TOKEN_ROW: u8 = 0xd1;
 const TOKEN_ENVCHANGE: u8 = 0xe3;
@@ -59,6 +60,9 @@ pub(crate) fn parse_query_response(input: &[u8]) -> Result<QueryOutput, Error> {
             TOKEN_ROW => rows.push(Row::get(&mut input, false, &columns)?),
             TOKEN_RETURN_VALUE => {
                 return_values.push(ReturnValue::get(&mut input)?.into_value());
+            }
+            TOKEN_RETURN_STATUS => {
+                let _ = read_u32_le(&mut input)?;
             }
             TOKEN_DONE | TOKEN_DONEPROC | TOKEN_DONEINPROC => {
                 let done = Done::get(&mut input)?;
@@ -169,7 +173,7 @@ mod tests {
 
     #[test]
     fn parses_return_value_response() {
-        let response = [return_value_int(42), done(0x10, 0, 1)].concat();
+        let response = [return_status(0), return_value_int(42), done(0x10, 0, 1)].concat();
         let output = parse_query_response(&response).unwrap();
 
         assert_eq!(1, output.return_values.len());
@@ -248,6 +252,13 @@ mod tests {
         out.push(crate::protocol::type_info::DataType::IntN as u8);
         out.push(4);
         out.push(4);
+        out.extend_from_slice(&value.to_le_bytes());
+        out
+    }
+
+    fn return_status(value: i32) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(TOKEN_RETURN_STATUS);
         out.extend_from_slice(&value.to_le_bytes());
         out
     }
