@@ -1,4 +1,5 @@
 use sqlx_core::Error;
+use std::sync::Arc;
 
 use super::col_meta_data::ColMetaData;
 use super::done::{Done, Status};
@@ -47,7 +48,7 @@ pub(crate) fn build_sql_batch_packet(
 
 pub(crate) fn parse_query_response(input: &[u8]) -> Result<QueryOutput, Error> {
     let mut input = input;
-    let mut columns = Vec::new();
+    let mut columns = Arc::<[MssqlColumn]>::from(Vec::new());
     let mut rows = Vec::new();
     let mut return_values = Vec::new();
     let mut env_changes = Vec::new();
@@ -57,9 +58,9 @@ pub(crate) fn parse_query_response(input: &[u8]) -> Result<QueryOutput, Error> {
         let token = read_u8(&mut input)?;
 
         match token {
-            TOKEN_COL_METADATA => columns = ColMetaData::get(&mut input)?,
-            TOKEN_ROW => rows.push(Row::get(&mut input, false, &columns)?),
-            TOKEN_NBCROW => rows.push(Row::get(&mut input, true, &columns)?),
+            TOKEN_COL_METADATA => columns = ColMetaData::get(&mut input)?.into(),
+            TOKEN_ROW => rows.push(Row::get(&mut input, false, Arc::clone(&columns))?),
+            TOKEN_NBCROW => rows.push(Row::get(&mut input, true, Arc::clone(&columns))?),
             TOKEN_RETURN_VALUE => {
                 return_values.push(ReturnValue::get(&mut input)?.into_value());
             }
@@ -94,7 +95,7 @@ pub(crate) fn parse_query_response(input: &[u8]) -> Result<QueryOutput, Error> {
     }
 
     Ok(QueryOutput {
-        columns,
+        columns: columns.to_vec(),
         rows,
         result: MssqlQueryResult::new(rows_affected),
         return_values,

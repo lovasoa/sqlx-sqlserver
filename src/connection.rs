@@ -628,10 +628,10 @@ where
     while offset < bytes.len() {
         let packet = tds_packet_slice(bytes, offset)?;
         stream.write_all(packet).await?;
-        stream.flush().await?;
         offset += packet.len();
     }
 
+    stream.flush().await?;
     Ok(())
 }
 

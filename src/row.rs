@@ -2,13 +2,14 @@ use sqlx_core::column::{Column, ColumnIndex};
 use sqlx_core::error::Error;
 use sqlx_core::row::Row;
 use sqlx_core::value::Value;
+use std::sync::Arc;
 
 use crate::{Mssql, MssqlColumn, MssqlValue, MssqlValueRef};
 
 /// SQL Server row skeleton.
 #[derive(Debug, Default, Clone)]
 pub struct MssqlRow {
-    columns: Vec<MssqlColumn>,
+    columns: Arc<[MssqlColumn]>,
     values: Vec<MssqlValue>,
 }
 
@@ -18,7 +19,7 @@ impl MssqlRow {
         Self::default()
     }
 
-    pub(crate) fn new(columns: Vec<MssqlColumn>, values: Vec<MssqlValue>) -> Self {
+    pub(crate) fn new_shared(columns: Arc<[MssqlColumn]>, values: Vec<MssqlValue>) -> Self {
         Self { columns, values }
     }
 }
@@ -27,7 +28,7 @@ impl Row for MssqlRow {
     type Database = Mssql;
 
     fn columns(&self) -> &[MssqlColumn] {
-        &self.columns
+        self.columns.as_ref()
     }
 
     fn try_get_raw<I>(&self, index: I) -> Result<MssqlValueRef<'_>, Error>

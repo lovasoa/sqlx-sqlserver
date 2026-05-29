@@ -102,9 +102,9 @@ impl AnyConnectionBackend for MssqlConnection {
         })
         .map(|result| match result {
             Ok(output) => {
-                let rows = output.rows.into_iter().map(|row| {
-                    let column_names = column_names(row.columns());
-                    AnyRow::map_from(&row, column_names).map(Either::Right)
+                let column_names = column_names(&output.columns);
+                let rows = output.rows.into_iter().map(move |row| {
+                    AnyRow::map_from(&row, Arc::clone(&column_names)).map(Either::Right)
                 });
                 let done = std::iter::once(Ok(Either::Left(map_result(output.result))));
                 stream::iter(rows.chain(done)).boxed()

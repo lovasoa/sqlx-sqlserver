@@ -1,5 +1,6 @@
 use sqlx_core::column::Column;
 use sqlx_core::Error;
+use std::sync::Arc;
 
 use super::read::take;
 use crate::{MssqlColumn, MssqlRow, MssqlValue};
@@ -11,7 +12,7 @@ impl Row {
     pub(crate) fn get(
         input: &mut &[u8],
         nullable: bool,
-        columns: &[MssqlColumn],
+        columns: Arc<[MssqlColumn]>,
     ) -> Result<MssqlRow, Error> {
         let mut values = Vec::with_capacity(columns.len());
         let nulls = if nullable {
@@ -38,6 +39,6 @@ impl Row {
             values.push(value);
         }
 
-        Ok(MssqlRow::new(columns.to_vec(), values))
+        Ok(MssqlRow::new_shared(columns, values))
     }
 }
