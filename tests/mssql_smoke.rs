@@ -16,8 +16,12 @@ use sqlx_core::statement::Statement;
 use sqlx_core::value::ValueRef;
 
 fn database_url() -> Option<String> {
-    let _ = dotenvy::dotenv();
-    std::env::var("MSSQL_DATABASE_URL").ok()
+    std::env::var("MSSQL_DATABASE_URL")
+        .ok()
+        .and_then(|url| match url.trim() {
+            "" => None,
+            url => Some(url.to_owned()),
+        })
 }
 
 #[cfg(feature = "integration-tests")]
