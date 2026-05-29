@@ -7,6 +7,8 @@ pub struct TokenType(u8);
 impl TokenType {
     /// ERROR token.
     pub const ERROR: Self = Self(0xaa);
+    /// INFO token.
+    pub const INFO: Self = Self(0xab);
     /// LOGINACK token.
     pub const LOGINACK: Self = Self(0xad);
     /// ENVCHANGE token.
@@ -120,6 +122,9 @@ pub fn parse_tokens(mut input: &[u8]) -> Result<Vec<Token>, TokenParseError> {
             Token::LoginAck(parse_login_ack(read_len_prefixed_token(&mut input)?)?)
         } else if token_type == TokenType::ERROR {
             Token::Error(parse_error(read_len_prefixed_token(&mut input)?)?)
+        } else if token_type == TokenType::INFO {
+            let _ = read_len_prefixed_token(&mut input)?;
+            continue;
         } else if token_type == TokenType::ENVCHANGE {
             Token::EnvChange(parse_env_change(read_len_prefixed_token(&mut input)?)?)
         } else if token_type == TokenType::DONE {
@@ -375,6 +380,24 @@ mod tests {
     }
 
     #[test]
+    fn skips_info_tokens_during_login() {
+        let bytes = [
+            len_prefixed(
+                TokenType::INFO,
+                error_body(5701, 1, 10, "Changed database", "", "", 1),
+            ),
+            login_ack("Microsoft SQL Server"),
+            done(0, 0, 0),
+        ]
+        .concat();
+
+        assert!(matches!(
+            parse_login_response(&bytes).unwrap(),
+            LoginResponse::Success { .. }
+        ));
+    }
+
+    #[test]
     fn rejects_truncated_login_ack() {
         let bytes = [TokenType::LOGINACK.code(), 10, 0, 1, 0x74];
 
@@ -386,10 +409,10 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_tokens_in_bounded_parser() {
-        let bytes = [0xab, 0, 0];
+        let bytes = [0xac, 0, 0];
 
         assert_eq!(
-            TokenParseError::UnsupportedToken(0xab),
+            TokenParseError::UnsupportedToken(0xac),
             parse_tokens(&bytes).unwrap_err()
         );
     }
@@ -433,6 +456,29 @@ mod tests {
         procedure_name: &str,
         line_number: u32,
     ) -> Vec<u8> {
+        len_prefixed(
+            TokenType::ERROR,
+            error_body(
+                number,
+                state,
+                class,
+                message,
+                server_name,
+                procedure_name,
+                line_number,
+            ),
+        )
+    }
+
+    fn error_body(
+        number: i32,
+        state: u8,
+        class: u8,
+        message: &str,
+        server_name: &str,
+        procedure_name: &str,
+        line_number: u32,
+    ) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&number.to_le_bytes());
         body.push(state);
@@ -441,8 +487,7 @@ mod tests {
         push_b_varchar(&mut body, server_name);
         push_b_varchar(&mut body, procedure_name);
         body.extend_from_slice(&line_number.to_le_bytes());
-
-        len_prefixed(TokenType::ERROR, body)
+        body
     }
 
     fn env_change(change_type: u8, data: &[u8]) -> Vec<u8> {

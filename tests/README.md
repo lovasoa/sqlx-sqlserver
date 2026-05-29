@@ -20,9 +20,10 @@ Integration tests require `MSSQL_DATABASE_URL`. When the variable is absent, the
 tests print a skip message and pass.
 
 ```sh
-MSSQL_DATABASE_URL='mssql://sa:Password123!@localhost:1433/master?encrypt=optional' \
+MSSQL_DATABASE_URL='mssql://sa:Password123!@localhost:1433/master?encrypt=not_supported' \
 cargo test --features integration-tests --test mssql_smoke
 ```
 
-Use `encrypt=optional` or `trust_server_certificate=true` for local self-signed
-development servers.
+The current wire slice supports unencrypted login only. TLS pre-login support is
+still pending, so use `encrypt=not_supported` only with development servers that
+allow unencrypted login.

@@ -17,7 +17,7 @@
 //! absent:
 //!
 //! ```text
-//! MSSQL_DATABASE_URL='mssql://sa:Password123!@localhost:1433/master?encrypt=optional' \
+//! MSSQL_DATABASE_URL='mssql://sa:Password123!@localhost:1433/master?encrypt=not_supported' \
 //! cargo test --features integration-tests --test mssql_smoke
 //! ```
 
@@ -35,6 +35,7 @@ pub mod options;
 pub mod protocol;
 mod query_result;
 mod row;
+mod ssrp;
 mod statement;
 mod transaction;
 mod type_info;

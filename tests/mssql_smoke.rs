@@ -1,5 +1,8 @@
 use sqlx_sqlserver::MssqlConnectOptions;
 
+#[cfg(feature = "integration-tests")]
+use sqlx_core::connection::{ConnectOptions, Connection};
+
 fn database_url() -> Option<String> {
     let _ = dotenvy::dotenv();
     std::env::var("MSSQL_DATABASE_URL").ok()
@@ -18,11 +21,16 @@ fn mssql_database_url_is_parseable_when_set() {
 
 #[cfg(feature = "integration-tests")]
 #[tokio::test]
-async fn integration_placeholder_skips_until_wire_connection_lands() {
-    let Some(_url) = database_url() else {
+async fn connects_and_pings_when_configured() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(url) = database_url() else {
         eprintln!("skipping SQL Server integration test: MSSQL_DATABASE_URL is not set");
-        return;
+        return Ok(());
     };
 
-    eprintln!("skipping SQL Server wire smoke test: connection port is not implemented yet");
+    let options = url.parse::<MssqlConnectOptions>()?;
+    let mut conn = options.connect().await?;
+    conn.ping().await?;
+    conn.close().await?;
+
+    Ok(())
 }

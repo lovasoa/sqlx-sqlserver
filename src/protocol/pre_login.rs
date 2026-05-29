@@ -1,5 +1,7 @@
-use crate::Encrypt;
+use crate::{Encrypt, MssqlConnectOptions};
 use thiserror::Error;
+
+use super::packet::{encode_message, PacketFrameError, PacketType};
 
 /// TDS pre-login option token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +158,60 @@ pub fn decode_encrypt(value: u8) -> Result<Encrypt, PreLoginError> {
     }
 }
 
+/// Builds an unframed TDS PRELOGIN payload from connection options.
+pub fn build_pre_login_payload(options: &MssqlConnectOptions) -> Result<Vec<u8>, PreLoginError> {
+    let mut pre_login_options = vec![
+        PreLoginOption {
+            token: PreLoginOptionToken::Version,
+            data: vec![0, 0, 0, 0, 0, 0],
+        },
+        PreLoginOption {
+            token: PreLoginOptionToken::Encryption,
+            data: vec![encode_encrypt(options.encrypt())],
+        },
+        PreLoginOption {
+            token: PreLoginOptionToken::Mars,
+            data: vec![0],
+        },
+    ];
+
+    if let Some(instance) = options.instance() {
+        let mut data = instance.as_bytes().to_vec();
+        data.push(0);
+        pre_login_options.push(PreLoginOption {
+            token: PreLoginOptionToken::Instance,
+            data,
+        });
+    }
+
+    assemble_options(&pre_login_options)
+}
+
+/// Builds framed TDS PRELOGIN packet bytes from connection options.
+pub fn build_pre_login_packet(options: &MssqlConnectOptions) -> Result<Vec<u8>, PreLoginError> {
+    let payload = build_pre_login_payload(options)?;
+
+    encode_message(
+        PacketType::PRE_LOGIN,
+        &payload,
+        usize::try_from(options.requested_packet_size())
+            .map_err(|_| PreLoginError::MessageTooLarge)?,
+    )
+    .map_err(PreLoginError::Packet)
+}
+
+/// Extracts the server encryption response from a PRELOGIN payload.
+pub fn parse_server_encrypt(input: &[u8]) -> Result<Encrypt, PreLoginError> {
+    let options = parse_options(input)?;
+    let encryption = options
+        .iter()
+        .find(|option| option.token == PreLoginOptionToken::Encryption)
+        .and_then(|option| option.data.first().copied())
+        .ok_or(PreLoginError::MissingEncryption)?;
+
+    decode_encrypt(encryption)
+}
+
 /// Error returned while decoding a pre-login helper value.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PreLoginError {
@@ -185,6 +241,12 @@ pub enum PreLoginError {
     /// The assembled pre-login message exceeds the protocol's 16-bit offsets.
     #[error("TDS pre-login message is too large")]
     MessageTooLarge,
+    /// Packet framing failed.
+    #[error(transparent)]
+    Packet(#[from] PacketFrameError),
+    /// The server PRELOGIN response did not include an encryption option.
+    #[error("TDS pre-login response is missing its encryption option")]
+    MissingEncryption,
 }
 
 #[cfg(test)]
@@ -270,6 +332,34 @@ mod tests {
             ],
             options
         );
+    }
+
+    #[test]
+    fn builds_pre_login_payload_from_connection_options() {
+        let options = MssqlConnectOptions::parse_url(
+            "mssql://localhost/master?encrypt=not_supported&instance=SQLEXPRESS",
+        )
+        .unwrap();
+        let payload = build_pre_login_payload(&options).unwrap();
+        let parsed = parse_options(&payload).unwrap();
+
+        assert!(parsed.iter().any(|option| {
+            option.token == PreLoginOptionToken::Encryption && option.data == vec![0x00]
+        }));
+        assert!(parsed.iter().any(|option| {
+            option.token == PreLoginOptionToken::Instance && option.data == b"SQLEXPRESS\0"
+        }));
+    }
+
+    #[test]
+    fn extracts_server_encrypt_option() {
+        let payload = assemble_options(&[PreLoginOption {
+            token: PreLoginOptionToken::Encryption,
+            data: vec![0x02],
+        }])
+        .unwrap();
+
+        assert_eq!(Encrypt::Off, parse_server_encrypt(&payload).unwrap());
     }
 
     #[test]

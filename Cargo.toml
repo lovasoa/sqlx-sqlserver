@@ -9,7 +9,7 @@ rust-version = "1.86.0"
 
 [features]
 default = []
-integration-tests = ["dep:tokio"]
+integration-tests = []
 
 [dependencies]
 futures-core = { version = "0.3.32", default-features = false }
@@ -20,10 +20,7 @@ sqlx-core = { version = "=0.9.0", default-features = false, features = ["any"] }
 thiserror = "2.0"
 url = "2.5"
 
-[dependencies.tokio]
-version = "1.47"
-features = ["macros", "net", "rt", "time"]
-optional = true
+tokio = { version = "1.47", features = ["io-util", "net", "time"] }
 
 [dev-dependencies]
 dotenvy = "0.15"

@@ -209,7 +209,7 @@ impl ConnectOptions for MssqlConnectOptions {
     where
         Self::Connection: Sized,
     {
-        Err(crate::connection::wire_not_implemented())
+        MssqlConnection::establish(self).await
     }
 
     fn log_statements(self, _level: log::LevelFilter) -> Self {
