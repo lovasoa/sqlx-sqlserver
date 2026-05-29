@@ -167,6 +167,42 @@ async fn fetches_bound_large_text_and_binary_when_configured(
 
 #[cfg(feature = "integration-tests")]
 #[tokio::test]
+async fn fetches_native_scalar_arguments_when_configured() -> Result<(), Box<dyn std::error::Error>>
+{
+    let Some(mut conn) = native_test_conn("SQL Server native scalar argument test").await? else {
+        return Ok(());
+    };
+
+    let bytes = vec![0x01, 0x23, 0x45, 0x67];
+    let row = sqlx_core::query::query(
+        "SELECT @p1, @p2, @p3, @p4, @p5, @p6, CAST(@p7 AS VARCHAR(12)), CAST(@p8 AS NVARCHAR(12))",
+    )
+    .bind(true)
+    .bind(-1234_i16)
+    .bind(9_876_543_210_i64)
+    .bind(3.25_f32)
+    .bind(6.5_f64)
+    .bind(bytes.as_slice())
+    .bind("varchar")
+    .bind("nvarchar")
+    .fetch_one(&mut conn)
+    .await?;
+
+    assert!(row.try_get::<bool, _>(0)?);
+    assert_eq!(-1234_i16, row.try_get::<i16, _>(1)?);
+    assert_eq!(9_876_543_210_i64, row.try_get::<i64, _>(2)?);
+    assert_eq!(3.25_f32, row.try_get::<f32, _>(3)?);
+    assert_eq!(6.5_f64, row.try_get::<f64, _>(4)?);
+    assert_eq!(bytes, row.try_get::<Vec<u8>, _>(5)?);
+    assert_eq!("varchar", row.try_get::<String, _>(6)?);
+    assert_eq!("nvarchar", row.try_get::<String, _>(7)?);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[cfg(feature = "integration-tests")]
+#[tokio::test]
 async fn fetches_varchar_text_when_configured() -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = native_test_conn("SQL Server varchar decode test").await? else {
         return Ok(());
@@ -290,6 +326,33 @@ async fn any_fetches_bound_integer_when_configured() -> Result<(), Box<dyn std::
         .await?;
 
     assert_eq!(7_i32, row.try_get::<i32, _>(0)?);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[cfg(feature = "integration-tests")]
+#[tokio::test]
+async fn any_fetches_text_blob_bool_and_typed_null_arguments_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = any_test_conn("SQL Server Any text/blob/bool/null argument test").await?
+    else {
+        return Ok(());
+    };
+
+    let bytes = vec![0xde, 0xad, 0xbe, 0xef];
+    let row = sqlx_core::query::query("SELECT @p1, @p2, @p3, @p4")
+        .bind("hello any")
+        .bind(bytes.as_slice())
+        .bind(true)
+        .bind(Option::<String>::None)
+        .fetch_one(&mut conn)
+        .await?;
+
+    assert_eq!("hello any", row.try_get::<String, _>(0)?);
+    assert_eq!(bytes, row.try_get::<Vec<u8>, _>(1)?);
+    assert!(row.try_get::<bool, _>(2)?);
+    assert!(row.try_get_raw(3)?.is_null());
 
     conn.close().await?;
     Ok(())
