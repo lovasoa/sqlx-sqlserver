@@ -10,7 +10,7 @@ to crates.io and is not wired into the `sqlx` facade crate, so examples use
 
 ```toml
 [dependencies]
-sqlx-sqlserver = "0.0.1-alpha"
+sqlx-sqlserver = "0.0.1-beta.1"
 sqlx-core = "=0.9.0"
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
