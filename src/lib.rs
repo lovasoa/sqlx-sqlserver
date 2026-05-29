@@ -11,7 +11,7 @@
 //! use sqlx_core::row::Row;
 //! use sqlx_sqlserver::MssqlConnectOptions;
 //!
-//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //! let mut conn = "mssql://sa:Password123!@localhost:1433/master?encrypt=mandatory&trust_server_certificate=true"
 //!     .parse::<MssqlConnectOptions>()?
 //!     .connect()
@@ -36,7 +36,7 @@
 //! ```no_run
 //! use sqlx_core::connection::Connection;
 //!
-//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //! sqlx_core::any::driver::install_drivers(&[sqlx_sqlserver::any::DRIVER])?;
 //!
 //! let mut conn = sqlx_core::any::AnyConnection::connect(
@@ -51,14 +51,14 @@
 //!
 //! To combine split drivers, install all of them once at application startup:
 //!
-//! ```no_run
-//! # fn install() -> Result<(), Box<dyn std::error::Error>> {
+//! ```ignore
+//! fn install() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //! sqlx_core::any::driver::install_drivers(&[
 //!     sqlx_sqlserver::any::DRIVER,
 //!     sqlx_odbc::any::DRIVER,
 //! ])?;
-//! # Ok(())
-//! # }
+//! Ok(())
+//! }
 //! ```
 //!
 //! The examples use `trust_server_certificate=true` for local development with

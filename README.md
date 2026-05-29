@@ -21,7 +21,7 @@ use sqlx_core::row::Row;
 use sqlx_sqlserver::MssqlConnectOptions;
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = "mssql://sa:Password123!@localhost:1433/master?encrypt=mandatory&trust_server_certificate=true"
         .parse::<MssqlConnectOptions>()?
         .connect()
