@@ -35,6 +35,7 @@ pub struct MssqlConnection {
     stream: Option<MssqlWireStream>,
     transaction_depth: usize,
     transaction_descriptor: u64,
+    pending_rollback_sql: Option<&'static str>,
 }
 
 impl MssqlConnection {
@@ -78,6 +79,7 @@ impl MssqlConnection {
                     stream: Some(stream),
                     transaction_depth: 0,
                     transaction_descriptor: 0,
+                    pending_rollback_sql: None,
                 };
                 conn.apply_env_changes(&env_changes);
                 Ok(conn)
@@ -123,6 +125,11 @@ impl MssqlConnection {
     }
 
     pub(crate) async fn run_sql_batch(&mut self, sql: &str) -> Result<QueryOutput, Error> {
+        self.flush_pending_rollback().await?;
+        self.run_sql_batch_direct(sql).await
+    }
+
+    async fn run_sql_batch_direct(&mut self, sql: &str) -> Result<QueryOutput, Error> {
         let transaction_descriptor = self.transaction_descriptor;
         let stream = self.stream.as_mut().ok_or_else(wire_not_implemented)?;
         let packet = build_sql_batch_packet(sql, stream.packet_size, transaction_descriptor)
@@ -132,11 +139,38 @@ impl MssqlConnection {
         self.read_query_response().await
     }
 
+    pub(crate) fn queue_rollback(&mut self) {
+        let sql = match self.transaction_depth {
+            0 => return,
+            1 => {
+                self.transaction_depth = 0;
+                "ROLLBACK TRANSACTION"
+            }
+            _ => {
+                self.transaction_depth -= 1;
+                "ROLLBACK TRANSACTION sqlx_savepoint"
+            }
+        };
+
+        self.pending_rollback_sql = Some(sql);
+    }
+
+    async fn flush_pending_rollback(&mut self) -> Result<(), Error> {
+        let Some(sql) = self.pending_rollback_sql.take() else {
+            return Ok(());
+        };
+
+        self.run_sql_batch_direct(sql).await?;
+        Ok(())
+    }
+
     pub(crate) async fn run_execute_sql(
         &mut self,
         sql: &str,
         arguments: Option<&MssqlArguments>,
     ) -> Result<QueryOutput, Error> {
+        self.flush_pending_rollback().await?;
+
         match arguments {
             Some(arguments) if !arguments.is_empty() => {
                 let transaction_descriptor = self.transaction_descriptor;
@@ -153,7 +187,7 @@ impl MssqlConnection {
                 stream.write_all(&packet).await?;
                 self.read_query_response().await
             }
-            _ => self.run_sql_batch(sql).await,
+            _ => self.run_sql_batch_direct(sql).await,
         }
     }
 
@@ -162,6 +196,8 @@ impl MssqlConnection {
         sql: &str,
         parameters: &[MssqlTypeInfo],
     ) -> Result<QueryOutput, Error> {
+        self.flush_pending_rollback().await?;
+
         let transaction_descriptor = self.transaction_descriptor;
         let stream = self.stream.as_mut().ok_or_else(wire_not_implemented)?;
         let packet =
@@ -211,6 +247,8 @@ impl Connection for MssqlConnection {
     type Options = MssqlConnectOptions;
 
     async fn close(mut self) -> Result<(), Error> {
+        self.flush_pending_rollback().await?;
+
         if let Some(mut stream) = self.stream.take() {
             stream.shutdown().await?;
         }
@@ -227,6 +265,8 @@ impl Connection for MssqlConnection {
     }
 
     async fn ping(&mut self) -> Result<(), Error> {
+        self.flush_pending_rollback().await?;
+
         if self.stream.is_some() {
             Ok(())
         } else {

@@ -188,6 +188,51 @@ async fn rolls_back_transaction_when_configured() -> Result<(), Box<dyn std::err
 
 #[cfg(feature = "integration-tests")]
 #[tokio::test]
+async fn dropped_transaction_rolls_back_on_next_use() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = native_test_conn("SQL Server dropped transaction rollback test").await?
+    else {
+        return Ok(());
+    };
+
+    let table_name = "_sqlx_drop_rollback_smoke";
+    let _ = conn
+        .execute(sqlx_core::sql_str::AssertSqlSafe(format!(
+            "DROP TABLE IF EXISTS {table_name}"
+        )))
+        .await?;
+    conn.execute(sqlx_core::sql_str::AssertSqlSafe(format!(
+        "CREATE TABLE {table_name} (id INT NOT NULL)"
+    )))
+    .await?;
+
+    {
+        let mut tx = conn.begin().await?;
+        sqlx_core::query::query(sqlx_core::sql_str::AssertSqlSafe(format!(
+            "INSERT INTO {table_name} (id) VALUES (1)"
+        )))
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    let count: i32 = sqlx_core::query_scalar::query_scalar(sqlx_core::sql_str::AssertSqlSafe(
+        format!("SELECT COUNT(*) FROM {table_name}"),
+    ))
+    .fetch_one(&mut conn)
+    .await?;
+
+    assert_eq!(0, count);
+
+    let _ = conn
+        .execute(sqlx_core::sql_str::AssertSqlSafe(format!(
+            "DROP TABLE IF EXISTS {table_name}"
+        )))
+        .await?;
+    conn.close().await?;
+    Ok(())
+}
+
+#[cfg(feature = "integration-tests")]
+#[tokio::test]
 async fn any_fetches_bound_integer_when_configured() -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = any_test_conn("SQL Server Any bound argument test").await? else {
         return Ok(());

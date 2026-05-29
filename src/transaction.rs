@@ -50,7 +50,7 @@ impl TransactionManager for MssqlTransactionManager {
     }
 
     fn start_rollback(conn: &mut MssqlConnection) {
-        conn.clear_transaction_depth();
+        conn.queue_rollback();
     }
 
     fn get_transaction_depth(conn: &<Self::Database as Database>::Connection) -> usize {

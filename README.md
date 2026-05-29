@@ -39,5 +39,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Any Driver
+
+Install this crate explicitly before opening SQL Server URLs through SQLx
+`AnyConnection`:
+
+```rust
+use sqlx_core::connection::Connection;
+
+sqlx_core::any::driver::install_drivers(&[sqlx_sqlserver::any::DRIVER])?;
+
+let mut conn = sqlx_core::any::AnyConnection::connect(
+    "mssql://sa:Password123!@localhost:1433/master?encrypt=mandatory&trust_server_certificate=true",
+)
+.await?;
+```
+
 For local development, run fast tests with `./scripts/ci.sh`. Run e2e tests
 with `MSSQL_DATABASE_URL=... ./scripts/test-mssql.sh`.
