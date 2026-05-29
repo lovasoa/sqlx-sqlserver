@@ -5,6 +5,9 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Independent Microsoft SQL Server driver crate for SQLx."
 repository = "https://github.com/lovasoa/sqlx-sqlserver"
+readme = "README.md"
+keywords = ["sqlx", "sqlserver", "mssql", "tds"]
+categories = ["database"]
 rust-version = "1.94.0"
 
 [features]
