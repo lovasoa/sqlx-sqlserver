@@ -4,8 +4,8 @@
 //! execution and the same stable scalar RPC argument types as the native connection.
 
 use crate::{
-    connection::wire_not_implemented, Mssql, MssqlArguments, MssqlColumn, MssqlConnectOptions,
-    MssqlConnection, MssqlQueryResult, MssqlTransactionManager, MssqlType, MssqlTypeInfo,
+    Mssql, MssqlArguments, MssqlColumn, MssqlConnectOptions, MssqlConnection, MssqlQueryResult,
+    MssqlTransactionManager, MssqlType, MssqlTypeInfo,
 };
 use futures_core::future::BoxFuture;
 use futures_core::stream::BoxStream;
@@ -22,6 +22,7 @@ use sqlx_core::database::Database;
 use sqlx_core::ext::ustr::UStr;
 use sqlx_core::row::Row;
 use sqlx_core::sql_str::SqlStr;
+use sqlx_core::statement::Statement;
 use sqlx_core::transaction::TransactionManager;
 use sqlx_core::{Either, Error, HashMap};
 use std::sync::Arc;
@@ -133,11 +134,43 @@ impl AnyConnectionBackend for MssqlConnection {
 
     fn prepare_with<'c, 'q: 'c>(
         &'c mut self,
-        _sql: SqlStr,
-        _parameters: &[AnyTypeInfo],
+        sql: SqlStr,
+        parameters: &[AnyTypeInfo],
     ) -> BoxFuture<'c, sqlx_core::Result<AnyStatement>> {
-        Box::pin(future::ready(Err(wire_not_implemented())))
+        let parameters = parameters
+            .iter()
+            .map(mssql_type_from_any)
+            .collect::<Result<Vec<_>, _>>();
+
+        Box::pin(async move {
+            let parameters = parameters?;
+            let statement = self.run_prepare(sql.as_str(), &parameters).await?;
+            let statement = crate::MssqlStatement::with_parameters(
+                sql,
+                statement.columns,
+                if parameters.is_empty() {
+                    None
+                } else {
+                    Some(Either::Left(parameters))
+                },
+            );
+            let column_names = column_names(statement.columns());
+            AnyStatement::try_from_statement(statement, column_names)
+        })
     }
+}
+
+fn mssql_type_from_any(type_info: &AnyTypeInfo) -> Result<MssqlTypeInfo, Error> {
+    Ok(match type_info.kind() {
+        AnyTypeInfoKind::Bool => MssqlTypeInfo::BIT,
+        AnyTypeInfoKind::SmallInt => MssqlTypeInfo::SMALLINT,
+        AnyTypeInfoKind::Integer | AnyTypeInfoKind::Null => MssqlTypeInfo::INT,
+        AnyTypeInfoKind::BigInt => MssqlTypeInfo::BIGINT,
+        AnyTypeInfoKind::Real => MssqlTypeInfo::REAL,
+        AnyTypeInfoKind::Double => MssqlTypeInfo::FLOAT,
+        AnyTypeInfoKind::Text => MssqlTypeInfo::NVARCHAR,
+        AnyTypeInfoKind::Blob => MssqlTypeInfo::VARBINARY,
+    })
 }
 
 fn convert_any_arguments(

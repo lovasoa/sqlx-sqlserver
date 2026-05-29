@@ -11,12 +11,29 @@ use crate::{Mssql, MssqlArguments, MssqlColumn, MssqlTypeInfo};
 pub struct MssqlStatement {
     sql: SqlStr,
     columns: Vec<MssqlColumn>,
+    parameters: Option<Either<Vec<MssqlTypeInfo>, usize>>,
 }
 
 impl MssqlStatement {
     /// Creates statement metadata for tests and future prepare support.
     pub fn new(sql: SqlStr, columns: Vec<MssqlColumn>) -> Self {
-        Self { sql, columns }
+        Self {
+            sql,
+            columns,
+            parameters: None,
+        }
+    }
+
+    pub(crate) fn with_parameters(
+        sql: SqlStr,
+        columns: Vec<MssqlColumn>,
+        parameters: Option<Either<Vec<MssqlTypeInfo>, usize>>,
+    ) -> Self {
+        Self {
+            sql,
+            columns,
+            parameters,
+        }
     }
 }
 
@@ -32,7 +49,11 @@ impl Statement for MssqlStatement {
     }
 
     fn parameters(&self) -> Option<Either<&[MssqlTypeInfo], usize>> {
-        None
+        match &self.parameters {
+            Some(Either::Left(parameters)) => Some(Either::Left(parameters)),
+            Some(Either::Right(count)) => Some(Either::Right(*count)),
+            None => None,
+        }
     }
 
     fn columns(&self) -> &[MssqlColumn] {

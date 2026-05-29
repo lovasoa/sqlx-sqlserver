@@ -8,6 +8,7 @@ use crate::{MssqlColumn, MssqlQueryResult, MssqlRow, MssqlType, MssqlTypeInfo, M
 const TOKEN_COL_METADATA: u8 = 0x81;
 const TOKEN_ERROR: u8 = 0xaa;
 const TOKEN_INFO: u8 = 0xab;
+const TOKEN_RETURN_VALUE: u8 = 0xac;
 const TOKEN_ROW: u8 = 0xd1;
 const TOKEN_ENVCHANGE: u8 = 0xe3;
 const TOKEN_DONE: u8 = 0xfd;
@@ -31,8 +32,10 @@ const DONE_COUNT: u16 = 0x0010;
 
 #[derive(Debug)]
 pub(crate) struct QueryOutput {
+    pub(crate) columns: Vec<MssqlColumn>,
     pub(crate) rows: Vec<MssqlRow>,
     pub(crate) result: MssqlQueryResult,
+    pub(crate) return_values: Vec<MssqlValue>,
 }
 
 pub(crate) fn build_sql_batch_packet(
@@ -54,6 +57,7 @@ pub(crate) fn parse_query_response(input: &[u8]) -> Result<QueryOutput, Error> {
     let mut input = input;
     let mut columns = Vec::new();
     let mut rows = Vec::new();
+    let mut return_values = Vec::new();
     let mut rows_affected = 0;
 
     while !input.is_empty() {
@@ -62,6 +66,9 @@ pub(crate) fn parse_query_response(input: &[u8]) -> Result<QueryOutput, Error> {
         match token {
             TOKEN_COL_METADATA => columns = parse_col_metadata(&mut input)?,
             TOKEN_ROW => rows.push(parse_row(&mut input, &columns)?),
+            TOKEN_RETURN_VALUE => {
+                return_values.push(parse_return_value(&mut input)?);
+            }
             TOKEN_DONE | TOKEN_DONEPROC | TOKEN_DONEINPROC => {
                 let done = parse_done(&mut input)?;
                 if done.status & DONE_COUNT != 0 {
@@ -85,8 +92,10 @@ pub(crate) fn parse_query_response(input: &[u8]) -> Result<QueryOutput, Error> {
     }
 
     Ok(QueryOutput {
+        columns,
         rows,
         result: MssqlQueryResult::new(rows_affected),
+        return_values,
     })
 }
 
@@ -269,6 +278,21 @@ fn parse_done(input: &mut &[u8]) -> Result<Done, Error> {
     })
 }
 
+fn parse_return_value(input: &mut &[u8]) -> Result<MssqlValue, Error> {
+    let _param_ordinal = read_u16_le(input)?;
+    let _param_name = read_b_varchar(input)?;
+    let _status = read_u8(input)?;
+    let _user_type = read_u32_le(input)?;
+    let _flags = read_u16_le(input)?;
+    let type_info = parse_type_info(input)?;
+
+    if type_info.is_variable_length() {
+        parse_variable_length_value(input, &type_info)
+    } else {
+        parse_fixed_length_value(input, &type_info)
+    }
+}
+
 struct Done {
     status: u16,
     _current_command: u16,
@@ -342,7 +366,9 @@ fn token_parse_error(error: TokenParseError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Mssql;
     use sqlx_core::row::Row;
+    use sqlx_core::value::Value;
 
     #[test]
     fn sql_batch_packet_starts_with_all_headers_and_utf16_sql() {
@@ -378,6 +404,19 @@ mod tests {
         assert_eq!(7_i32, output.rows[0].try_get::<i32, _>(0).unwrap());
     }
 
+    #[test]
+    fn parses_return_value_response() {
+        let response = [return_value_int(42), done(0x10, 0, 1)].concat();
+        let output = parse_query_response(&response).unwrap();
+
+        assert_eq!(1, output.return_values.len());
+        assert_eq!(
+            42_i32,
+            <i32 as sqlx_core::decode::Decode<Mssql>>::decode(output.return_values[0].as_ref())
+                .unwrap()
+        );
+    }
+
     fn col_metadata_int(name: &str) -> Vec<u8> {
         let mut out = Vec::new();
         out.push(TOKEN_COL_METADATA);
@@ -411,6 +450,21 @@ mod tests {
     fn row_intn(value: i32) -> Vec<u8> {
         let mut out = Vec::new();
         out.push(TOKEN_ROW);
+        out.push(4);
+        out.extend_from_slice(&value.to_le_bytes());
+        out
+    }
+
+    fn return_value_int(value: i32) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(TOKEN_RETURN_VALUE);
+        out.extend_from_slice(&1_u16.to_le_bytes());
+        out.push(0);
+        out.push(1);
+        out.extend_from_slice(&0_u32.to_le_bytes());
+        out.extend_from_slice(&0_u16.to_le_bytes());
+        out.push(DATA_TYPE_INTN);
+        out.push(4);
         out.push(4);
         out.extend_from_slice(&value.to_le_bytes());
         out

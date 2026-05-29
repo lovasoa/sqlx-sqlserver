@@ -13,6 +13,7 @@ const DATA_TYPE_FLOATN: u8 = 0x6d;
 const DATA_TYPE_BIGVARBINARY: u8 = 0xa5;
 const DATA_TYPE_NVARCHAR: u8 = 0xe7;
 const DEFAULT_COLLATION: [u8; 5] = [0x81, 0x04, 0xd0, 0x00, 0x34];
+const STATUS_BY_REF_VALUE: u8 = 0x01;
 
 /// SQL Server argument buffer.
 #[derive(Debug, Default, Clone)]
@@ -92,8 +93,34 @@ pub(crate) fn write_parameter(
     encoded: &[u8],
     is_null: bool,
 ) -> Result<(), BoxDynError> {
+    write_parameter_with_status(out, name, 0, type_info, encoded, is_null)
+}
+
+pub(crate) fn write_output_i32_parameter(
+    out: &mut Vec<u8>,
+    name: &str,
+    value: i32,
+) -> Result<(), BoxDynError> {
+    write_parameter_with_status(
+        out,
+        name,
+        STATUS_BY_REF_VALUE,
+        &MssqlTypeInfo::INT,
+        &value.to_le_bytes(),
+        false,
+    )
+}
+
+fn write_parameter_with_status(
+    out: &mut Vec<u8>,
+    name: &str,
+    status: u8,
+    type_info: &MssqlTypeInfo,
+    encoded: &[u8],
+    is_null: bool,
+) -> Result<(), BoxDynError> {
     write_b_varchar(out, name)?;
-    out.push(0);
+    out.push(status);
     write_type_info(out, type_info, encoded.len(), is_null)?;
     write_param_len_data(out, type_info, encoded, is_null)?;
     Ok(())
@@ -107,6 +134,27 @@ pub(crate) fn write_nvarchar_parameter(
     let mut encoded = Vec::with_capacity(value.len() * 2);
     write_utf16(&mut encoded, value);
     write_parameter(out, name, &MssqlTypeInfo::NVARCHAR, &encoded, false)
+}
+
+pub(crate) fn write_null_nvarchar_parameter(
+    out: &mut Vec<u8>,
+    name: &str,
+) -> Result<(), BoxDynError> {
+    write_parameter(out, name, &MssqlTypeInfo::NVARCHAR, &[], true)
+}
+
+pub(crate) fn type_declaration(type_info: &MssqlTypeInfo) -> Result<&'static str, BoxDynError> {
+    Ok(match type_info.kind() {
+        MssqlType::Bit => "bit",
+        MssqlType::SmallInt => "smallint",
+        MssqlType::Int => "int",
+        MssqlType::BigInt => "bigint",
+        MssqlType::Real => "real",
+        MssqlType::Float => "float",
+        MssqlType::NVarChar => "nvarchar(max)",
+        MssqlType::VarBinary => "varbinary(max)",
+        other => return Err(format!("SQL Server arguments do not support type {other:?}").into()),
+    })
 }
 
 fn write_type_info(

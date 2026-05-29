@@ -2,9 +2,11 @@ use futures_core::future::BoxFuture;
 use futures_core::stream::BoxStream;
 use futures_util::{future, stream, StreamExt};
 use sqlx_core::connection::Connection;
+use sqlx_core::decode::Decode;
 use sqlx_core::error::Error;
 use sqlx_core::executor::{Execute, Executor};
 use sqlx_core::transaction::Transaction;
+use sqlx_core::value::Value;
 use sqlx_core::Either;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -13,11 +15,13 @@ use crate::protocol::login::{build_login7_packet, Login7Error};
 use crate::protocol::packet::{PacketHeader, PacketStatus, PacketType, PACKET_HEADER_LEN};
 use crate::protocol::pre_login::{build_pre_login_packet, parse_server_encrypt, PreLoginError};
 use crate::protocol::query::{build_sql_batch_packet, parse_query_response, QueryOutput};
-use crate::protocol::rpc::build_execute_sql_packet;
+use crate::protocol::rpc::{
+    build_execute_sql_packet, build_prepare_packet, build_unprepare_packet,
+};
 use crate::protocol::token::{parse_login_response, LoginResponse, ServerError, TokenParseError};
 use crate::{
     ssrp, Encrypt, Mssql, MssqlArguments, MssqlConnectOptions, MssqlQueryResult, MssqlRow,
-    MssqlStatement,
+    MssqlStatement, MssqlTypeInfo,
 };
 
 /// SQL Server connection.
@@ -109,6 +113,35 @@ impl MssqlConnection {
             }
             _ => self.run_sql_batch(sql).await,
         }
+    }
+
+    pub(crate) async fn run_prepare(
+        &mut self,
+        sql: &str,
+        parameters: &[MssqlTypeInfo],
+    ) -> Result<QueryOutput, Error> {
+        let stream = self.stream.as_mut().ok_or_else(wire_not_implemented)?;
+        let packet =
+            build_prepare_packet(sql, parameters, stream.packet_size, 0).map_err(|error| {
+                Error::Protocol(format!("failed to encode SQL Server prepare RPC: {error}"))
+            })?;
+        stream.write_all(&packet).await?;
+
+        let output = self.read_query_response().await?;
+
+        if let Some(statement_id) = first_i32_return_value(&output)? {
+            let stream = self.stream.as_mut().ok_or_else(wire_not_implemented)?;
+            let packet =
+                build_unprepare_packet(statement_id, stream.packet_size, 0).map_err(|error| {
+                    Error::Protocol(format!(
+                        "failed to encode SQL Server unprepare RPC: {error}"
+                    ))
+                })?;
+            stream.write_all(&packet).await?;
+            let _ = self.read_query_response().await?;
+        }
+
+        Ok(output)
     }
 
     async fn read_query_response(&mut self) -> Result<QueryOutput, Error> {
@@ -225,14 +258,40 @@ impl<'c> Executor<'c> for &'c mut MssqlConnection {
 
     fn prepare_with<'e>(
         self,
-        _sql: sqlx_core::sql_str::SqlStr,
-        _parameters: &'e [crate::MssqlTypeInfo],
+        sql: sqlx_core::sql_str::SqlStr,
+        parameters: &'e [crate::MssqlTypeInfo],
     ) -> BoxFuture<'e, Result<MssqlStatement, Error>>
     where
         'c: 'e,
     {
-        Box::pin(future::ready(Err(wire_not_implemented())))
+        Box::pin(async move {
+            let output = self.run_prepare(sql.as_str(), parameters).await?;
+            let parameters = if parameters.is_empty() {
+                None
+            } else {
+                Some(Either::Left(parameters.to_vec()))
+            };
+
+            Ok(MssqlStatement::with_parameters(
+                sql,
+                output.columns,
+                parameters,
+            ))
+        })
     }
+}
+
+fn first_i32_return_value(output: &QueryOutput) -> Result<Option<i32>, Error> {
+    output
+        .return_values
+        .first()
+        .map(|value| {
+            <i32 as Decode<Mssql>>::decode(value.as_ref()).map_err(|error| Error::ColumnDecode {
+                index: "return value".to_owned(),
+                source: error,
+            })
+        })
+        .transpose()
 }
 
 pub(crate) fn wire_not_implemented() -> Error {

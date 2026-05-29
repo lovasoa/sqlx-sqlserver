@@ -3,9 +3,15 @@ use sqlx_sqlserver::MssqlConnectOptions;
 use std::sync::Once;
 
 #[cfg(feature = "integration-tests")]
+use sqlx_core::column::Column;
+#[cfg(feature = "integration-tests")]
 use sqlx_core::connection::{ConnectOptions, Connection};
 #[cfg(feature = "integration-tests")]
+use sqlx_core::executor::Executor;
+#[cfg(feature = "integration-tests")]
 use sqlx_core::row::Row;
+#[cfg(feature = "integration-tests")]
+use sqlx_core::statement::Statement;
 #[cfg(feature = "integration-tests")]
 use sqlx_core::value::ValueRef;
 
@@ -127,6 +133,24 @@ async fn fetches_bound_null_when_configured() -> Result<(), Box<dyn std::error::
 
 #[cfg(feature = "integration-tests")]
 #[tokio::test]
+async fn prepares_statement_metadata_when_configured() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = native_test_conn("SQL Server prepare test").await? else {
+        return Ok(());
+    };
+
+    let statement = conn
+        .prepare(sqlx_core::sql_str::SqlStr::from_static("SELECT 1 AS value"))
+        .await?;
+
+    assert_eq!(1, statement.columns().len());
+    assert_eq!("value", statement.columns()[0].name());
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[cfg(feature = "integration-tests")]
+#[tokio::test]
 async fn rolls_back_transaction_when_configured() -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = native_test_conn("SQL Server transaction test").await? else {
         return Ok(());
@@ -152,6 +176,25 @@ async fn any_fetches_bound_integer_when_configured() -> Result<(), Box<dyn std::
         .await?;
 
     assert_eq!(7_i32, row.try_get::<i32, _>(0)?);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[cfg(feature = "integration-tests")]
+#[tokio::test]
+async fn any_prepares_statement_metadata_when_configured() -> Result<(), Box<dyn std::error::Error>>
+{
+    let Some(mut conn) = any_test_conn("SQL Server Any prepare test").await? else {
+        return Ok(());
+    };
+
+    let statement = conn
+        .prepare(sqlx_core::sql_str::SqlStr::from_static("SELECT 1 AS value"))
+        .await?;
+
+    assert_eq!(1, statement.columns().len());
+    assert_eq!("value", statement.columns()[0].name());
 
     conn.close().await?;
     Ok(())
