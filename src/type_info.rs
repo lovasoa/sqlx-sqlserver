@@ -2,6 +2,8 @@ use std::fmt::{self, Display, Formatter};
 
 use sqlx_core::type_info::TypeInfo;
 
+use crate::protocol::type_info as protocol;
+
 /// SQL Server scalar type families known by the skeleton driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MssqlType {
@@ -35,6 +37,7 @@ pub struct MssqlTypeInfo {
     kind: MssqlType,
     variable_length: bool,
     size: Option<u16>,
+    protocol_type_info: Option<protocol::TypeInfo>,
 }
 
 impl MssqlTypeInfo {
@@ -44,14 +47,7 @@ impl MssqlTypeInfo {
             kind,
             variable_length: false,
             size: None,
-        }
-    }
-
-    pub(crate) const fn tds_variable(kind: MssqlType, size: u16) -> Self {
-        Self {
-            kind,
-            variable_length: true,
-            size: Some(size),
+            protocol_type_info: None,
         }
     }
 
@@ -60,12 +56,8 @@ impl MssqlTypeInfo {
         &self.kind
     }
 
-    pub(crate) const fn is_variable_length(&self) -> bool {
-        self.variable_length
-    }
-
-    pub(crate) const fn max_size(&self) -> Option<u16> {
-        self.size
+    pub(crate) const fn protocol_type_info(&self) -> Option<&protocol::TypeInfo> {
+        self.protocol_type_info.as_ref()
     }
 
     /// SQL `NULL` type information.
@@ -88,6 +80,49 @@ impl MssqlTypeInfo {
     pub const NVARCHAR: Self = Self::new(MssqlType::NVarChar);
     /// SQL Server binary type information.
     pub const VARBINARY: Self = Self::new(MssqlType::VarBinary);
+
+    pub(crate) fn from_protocol(type_info: &protocol::TypeInfo) -> Self {
+        let kind = match type_info.ty {
+            protocol::DataType::Null => MssqlType::Null,
+            protocol::DataType::Bit | protocol::DataType::BitN => MssqlType::Bit,
+            protocol::DataType::TinyInt => MssqlType::TinyInt,
+            protocol::DataType::SmallInt => MssqlType::SmallInt,
+            protocol::DataType::Int => MssqlType::Int,
+            protocol::DataType::BigInt => MssqlType::BigInt,
+            protocol::DataType::Real => MssqlType::Real,
+            protocol::DataType::Float => MssqlType::Float,
+            protocol::DataType::IntN => match type_info.size {
+                1 => MssqlType::TinyInt,
+                2 => MssqlType::SmallInt,
+                4 => MssqlType::Int,
+                8 => MssqlType::BigInt,
+                _ => MssqlType::Other(type_info.name().to_owned()),
+            },
+            protocol::DataType::FloatN => match type_info.size {
+                4 => MssqlType::Real,
+                8 => MssqlType::Float,
+                _ => MssqlType::Other(type_info.name().to_owned()),
+            },
+            protocol::DataType::NVarChar
+            | protocol::DataType::NChar
+            | protocol::DataType::VarChar
+            | protocol::DataType::Char
+            | protocol::DataType::BigVarChar
+            | protocol::DataType::BigChar => MssqlType::NVarChar,
+            protocol::DataType::VarBinary
+            | protocol::DataType::Binary
+            | protocol::DataType::BigVarBinary
+            | protocol::DataType::BigBinary => MssqlType::VarBinary,
+            _ => MssqlType::Other(type_info.name().to_owned()),
+        };
+
+        Self {
+            kind,
+            variable_length: type_info.is_nullable_or_variable_length(),
+            size: u16::try_from(type_info.size).ok(),
+            protocol_type_info: Some(type_info.clone()),
+        }
+    }
 }
 
 impl TypeInfo for MssqlTypeInfo {

@@ -3,7 +3,8 @@ use sqlx_core::Error;
 
 use super::packet::{encode_message, PacketFrameError, PacketType};
 use super::token::{parse_env_change, parse_server_error, EnvChange, ServerError, TokenParseError};
-use crate::{MssqlColumn, MssqlQueryResult, MssqlRow, MssqlType, MssqlTypeInfo, MssqlValue};
+use super::type_info::{TypeInfo as ProtocolTypeInfo, TypeInfoError};
+use crate::{MssqlColumn, MssqlQueryResult, MssqlRow, MssqlTypeInfo, MssqlValue};
 
 const TOKEN_COL_METADATA: u8 = 0x81;
 const TOKEN_ERROR: u8 = 0xaa;
@@ -14,19 +15,6 @@ const TOKEN_ENVCHANGE: u8 = 0xe3;
 const TOKEN_DONE: u8 = 0xfd;
 const TOKEN_DONEPROC: u8 = 0xfe;
 const TOKEN_DONEINPROC: u8 = 0xff;
-
-const DATA_TYPE_TINYINT: u8 = 0x30;
-const DATA_TYPE_BIT: u8 = 0x32;
-const DATA_TYPE_SMALLINT: u8 = 0x34;
-const DATA_TYPE_INT: u8 = 0x38;
-const DATA_TYPE_REAL: u8 = 0x3b;
-const DATA_TYPE_FLOAT: u8 = 0x3e;
-const DATA_TYPE_BIGINT: u8 = 0x7f;
-const DATA_TYPE_INTN: u8 = 0x26;
-const DATA_TYPE_BITN: u8 = 0x68;
-const DATA_TYPE_FLOATN: u8 = 0x6d;
-const DATA_TYPE_BIGVARBINARY: u8 = 0xa5;
-const DATA_TYPE_NVARCHAR: u8 = 0xe7;
 
 const DONE_COUNT: u16 = 0x0010;
 
@@ -125,65 +113,17 @@ fn parse_col_metadata(input: &mut &[u8]) -> Result<Vec<MssqlColumn>, Error> {
     for ordinal in 0..usize::from(count) {
         let _user_type = read_u32_le(input)?;
         let _flags = read_u16_le(input)?;
-        let type_info = parse_type_info(input)?;
+        let type_info = ProtocolTypeInfo::get(input).map_err(type_info_error)?;
         let name = read_b_varchar(input)?;
 
-        columns.push(MssqlColumn::new(ordinal, name, type_info));
+        columns.push(MssqlColumn::new(
+            ordinal,
+            name,
+            MssqlTypeInfo::from_protocol(&type_info),
+        ));
     }
 
     Ok(columns)
-}
-
-fn parse_type_info(input: &mut &[u8]) -> Result<MssqlTypeInfo, Error> {
-    let ty = read_u8(input)?;
-
-    Ok(match ty {
-        DATA_TYPE_TINYINT => MssqlTypeInfo::TINYINT,
-        DATA_TYPE_BIT => MssqlTypeInfo::BIT,
-        DATA_TYPE_SMALLINT => MssqlTypeInfo::SMALLINT,
-        DATA_TYPE_INT => MssqlTypeInfo::INT,
-        DATA_TYPE_REAL => MssqlTypeInfo::REAL,
-        DATA_TYPE_FLOAT => MssqlTypeInfo::FLOAT,
-        DATA_TYPE_BIGINT => MssqlTypeInfo::BIGINT,
-        DATA_TYPE_INTN => match read_u8(input)? {
-            1 => MssqlTypeInfo::tds_variable(MssqlType::TinyInt, 1),
-            2 => MssqlTypeInfo::tds_variable(MssqlType::SmallInt, 2),
-            4 => MssqlTypeInfo::tds_variable(MssqlType::Int, 4),
-            8 => MssqlTypeInfo::tds_variable(MssqlType::BigInt, 8),
-            size => {
-                return Err(Error::Protocol(format!(
-                    "unsupported SQL Server INTN size {size}"
-                )));
-            }
-        },
-        DATA_TYPE_BITN => match read_u8(input)? {
-            1 => MssqlTypeInfo::tds_variable(MssqlType::Bit, 1),
-            size => {
-                return Err(Error::Protocol(format!(
-                    "unsupported SQL Server BITN size {size}"
-                )));
-            }
-        },
-        DATA_TYPE_FLOATN => match read_u8(input)? {
-            4 => MssqlTypeInfo::tds_variable(MssqlType::Real, 4),
-            8 => MssqlTypeInfo::tds_variable(MssqlType::Float, 8),
-            size => {
-                return Err(Error::Protocol(format!(
-                    "unsupported SQL Server FLOATN size {size}"
-                )));
-            }
-        },
-        DATA_TYPE_BIGVARBINARY => {
-            let size = read_u16_le(input)?;
-            MssqlTypeInfo::tds_variable(MssqlType::VarBinary, size)
-        }
-        DATA_TYPE_NVARCHAR => {
-            let size = read_u16_le(input)?;
-            let _collation = take(input, 5)?;
-            MssqlTypeInfo::tds_variable(MssqlType::NVarChar, size)
-        }
-        other => MssqlTypeInfo::new(MssqlType::Other(format!("TDS_TYPE_0x{other:02x}"))),
-    })
 }
 
 fn parse_row(input: &mut &[u8], columns: &[MssqlColumn]) -> Result<MssqlRow, Error> {
@@ -191,11 +131,7 @@ fn parse_row(input: &mut &[u8], columns: &[MssqlColumn]) -> Result<MssqlRow, Err
 
     for column in columns {
         let type_info = column.type_info();
-        let value = if type_info.is_variable_length() {
-            parse_variable_length_value(input, type_info)?
-        } else {
-            parse_fixed_length_value(input, type_info)?
-        };
+        let value = parse_protocol_value(input, type_info)?;
 
         values.push(value);
     }
@@ -203,79 +139,14 @@ fn parse_row(input: &mut &[u8], columns: &[MssqlColumn]) -> Result<MssqlRow, Err
     Ok(MssqlRow::new(columns.to_vec(), values))
 }
 
-fn parse_fixed_length_value(
-    input: &mut &[u8],
-    type_info: &MssqlTypeInfo,
-) -> Result<MssqlValue, Error> {
-    let len = match type_info.kind() {
-        MssqlType::Bit | MssqlType::TinyInt => 1,
-        MssqlType::SmallInt => 2,
-        MssqlType::Int | MssqlType::Real => 4,
-        MssqlType::BigInt | MssqlType::Float => 8,
-        other => {
-            return Err(Error::Protocol(format!(
-                "SQL Server row decoding does not support type {other:?}"
-            )));
-        }
-    };
-
-    Ok(MssqlValue::new(
-        type_info.clone(),
-        Some(take(input, len)?.to_vec()),
-    ))
-}
-
-fn parse_variable_length_value(
-    input: &mut &[u8],
-    type_info: &MssqlTypeInfo,
-) -> Result<MssqlValue, Error> {
-    match type_info.kind() {
-        MssqlType::Bit
-        | MssqlType::TinyInt
-        | MssqlType::SmallInt
-        | MssqlType::Int
-        | MssqlType::BigInt
-        | MssqlType::Real
-        | MssqlType::Float => {
-            let len = read_u8(input)?;
-            if len == 0 || len == u8::MAX {
-                Ok(MssqlValue::null(type_info.clone()))
-            } else {
-                validate_value_len(type_info, usize::from(len))?;
-                Ok(MssqlValue::new(
-                    type_info.clone(),
-                    Some(take(input, usize::from(len))?.to_vec()),
-                ))
-            }
-        }
-        MssqlType::NVarChar | MssqlType::VarBinary => {
-            let len = read_u16_le(input)?;
-            if len == u16::MAX {
-                Ok(MssqlValue::null(type_info.clone()))
-            } else {
-                validate_value_len(type_info, usize::from(len))?;
-                Ok(MssqlValue::new(
-                    type_info.clone(),
-                    Some(take(input, usize::from(len))?.to_vec()),
-                ))
-            }
-        }
-        other => Err(Error::Protocol(format!(
-            "SQL Server row decoding does not support variable-length type {other:?}"
-        ))),
-    }
-}
-
-fn validate_value_len(type_info: &MssqlTypeInfo, len: usize) -> Result<(), Error> {
-    if let Some(max_size) = type_info.max_size() {
-        if max_size != u16::MAX && len > usize::from(max_size) {
-            return Err(Error::Protocol(format!(
-                "SQL Server value length {len} exceeds declared type size {max_size}"
-            )));
-        }
-    }
-
-    Ok(())
+fn parse_protocol_value(input: &mut &[u8], type_info: &MssqlTypeInfo) -> Result<MssqlValue, Error> {
+    let protocol_type_info = type_info
+        .protocol_type_info()
+        .ok_or_else(|| Error::Protocol(format!("missing protocol type info for {type_info}")))?;
+    let data = protocol_type_info
+        .get_value(input)
+        .map_err(type_info_error)?;
+    Ok(MssqlValue::new(type_info.clone(), data))
 }
 
 fn parse_done(input: &mut &[u8]) -> Result<Done, Error> {
@@ -292,13 +163,12 @@ fn parse_return_value(input: &mut &[u8]) -> Result<MssqlValue, Error> {
     let _status = read_u8(input)?;
     let _user_type = read_u32_le(input)?;
     let _flags = read_u16_le(input)?;
-    let type_info = parse_type_info(input)?;
-
-    if type_info.is_variable_length() {
-        parse_variable_length_value(input, &type_info)
-    } else {
-        parse_fixed_length_value(input, &type_info)
-    }
+    let protocol_type_info = ProtocolTypeInfo::get(input).map_err(type_info_error)?;
+    let type_info = MssqlTypeInfo::from_protocol(&protocol_type_info);
+    let data = protocol_type_info
+        .get_value(input)
+        .map_err(type_info_error)?;
+    Ok(MssqlValue::new(type_info, data))
 }
 
 struct Done {
@@ -368,6 +238,10 @@ fn server_error(error: ServerError) -> Error {
 }
 
 fn token_parse_error(error: TokenParseError) -> Error {
+    Error::Protocol(error.to_string())
+}
+
+fn type_info_error(error: TypeInfoError) -> Error {
     Error::Protocol(error.to_string())
 }
 
@@ -461,7 +335,7 @@ mod tests {
         out.extend_from_slice(&1_u16.to_le_bytes());
         out.extend_from_slice(&0_u32.to_le_bytes());
         out.extend_from_slice(&0_u16.to_le_bytes());
-        out.push(DATA_TYPE_INT);
+        out.push(crate::protocol::type_info::DataType::Int as u8);
         push_b_varchar(&mut out, name);
         out
     }
@@ -472,7 +346,7 @@ mod tests {
         out.extend_from_slice(&1_u16.to_le_bytes());
         out.extend_from_slice(&0_u32.to_le_bytes());
         out.extend_from_slice(&0_u16.to_le_bytes());
-        out.push(DATA_TYPE_INTN);
+        out.push(crate::protocol::type_info::DataType::IntN as u8);
         out.push(4);
         push_b_varchar(&mut out, name);
         out
@@ -501,7 +375,7 @@ mod tests {
         out.push(1);
         out.extend_from_slice(&0_u32.to_le_bytes());
         out.extend_from_slice(&0_u16.to_le_bytes());
-        out.push(DATA_TYPE_INTN);
+        out.push(crate::protocol::type_info::DataType::IntN as u8);
         out.push(4);
         out.push(4);
         out.extend_from_slice(&value.to_le_bytes());

@@ -291,6 +291,24 @@ impl TypeInfo {
         matches!(self.ty, DataType::Null)
     }
 
+    pub(crate) fn is_nullable_or_variable_length(&self) -> bool {
+        !matches!(
+            self.ty,
+            DataType::Null
+                | DataType::TinyInt
+                | DataType::Bit
+                | DataType::SmallInt
+                | DataType::Int
+                | DataType::SmallDateTime
+                | DataType::Real
+                | DataType::Money
+                | DataType::DateTime
+                | DataType::Float
+                | DataType::SmallMoney
+                | DataType::BigInt
+        )
+    }
+
     pub(crate) fn get_value(&self, input: &mut &[u8]) -> Result<Option<Vec<u8>>, TypeInfoError> {
         Ok(match self.ty {
             DataType::Null
