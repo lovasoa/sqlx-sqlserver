@@ -101,7 +101,10 @@ pub struct Done {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginResponse {
     /// LOGINACK was received and no ERROR token was present.
-    Success { login_ack: LoginAck },
+    Success {
+        /// Accepted login metadata returned by the server.
+        login_ack: LoginAck,
+    },
     /// Server returned at least one ERROR token.
     ServerError(ServerError),
 }

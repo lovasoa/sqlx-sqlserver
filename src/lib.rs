@@ -21,6 +21,8 @@
 //! cargo test --features integration-tests --test mssql_smoke
 //! ```
 
+#![deny(missing_docs)]
+#![deny(rustdoc::broken_intra_doc_links)]
 #![warn(future_incompatible, rust_2018_idioms)]
 
 pub mod any;
@@ -28,6 +30,7 @@ mod arguments;
 mod column;
 mod connection;
 mod database;
+/// Connection option parsing and configuration for SQL Server.
 pub mod options;
 pub mod protocol;
 mod query_result;
