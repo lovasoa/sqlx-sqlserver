@@ -14,14 +14,14 @@ use tokio::net::TcpStream;
 use tokio_native_tls::TlsConnector;
 
 use crate::error::server_error;
-use crate::protocol::login::{build_login7_packet, Login7Error};
+use crate::protocol::login::build_login7_packet;
 use crate::protocol::packet::{PacketHeader, PacketStatus, PacketType, PACKET_HEADER_LEN};
-use crate::protocol::pre_login::{build_pre_login_packet, parse_server_encrypt, PreLoginError};
+use crate::protocol::pre_login::{build_pre_login_packet, parse_server_encrypt};
 use crate::protocol::query::{build_sql_batch_packet, parse_query_response, QueryOutput};
 use crate::protocol::rpc::{
     build_execute_sql_packet, build_prepare_packet, build_unprepare_packet,
 };
-use crate::protocol::token::{parse_login_response, EnvChange, LoginResponse, TokenParseError};
+use crate::protocol::token::{parse_login_response, EnvChange, LoginResponse};
 use crate::tls::TlsPreloginStream;
 use crate::{
     ssrp, Encrypt, Mssql, MssqlArguments, MssqlConnectOptions, MssqlQueryResult, MssqlRow,
@@ -42,10 +42,20 @@ impl MssqlConnection {
     pub async fn establish(options: &MssqlConnectOptions) -> Result<Self, Error> {
         let mut stream = MssqlWireStream::connect(options).await?;
 
-        let pre_login = build_pre_login_packet(options).map_err(pre_login_error)?;
-        stream.write_all(&pre_login).await?;
+        let pre_login = build_pre_login_packet(options).map_err(|error| {
+            Error::Protocol(format!(
+                "failed to build SQL Server PRELOGIN packet: {error}"
+            ))
+        })?;
+        stream
+            .write_all(&pre_login)
+            .await
+            .map_err(|error| context_error("failed to send SQL Server PRELOGIN packet", error))?;
 
-        let pre_login_response = stream.read_message().await?;
+        let pre_login_response = stream
+            .read_message()
+            .await
+            .map_err(|error| context_error("failed to read SQL Server PRELOGIN response", error))?;
         if pre_login_response.packet_type != PacketType::TABULAR_RESULT {
             return Err(Error::Protocol(format!(
                 "expected SQL Server PRELOGIN response as tabular result, got packet type 0x{:02x}",
@@ -54,17 +64,29 @@ impl MssqlConnection {
         }
 
         let server_encrypt =
-            parse_server_encrypt(&pre_login_response.payload).map_err(pre_login_error)?;
+            parse_server_encrypt(&pre_login_response.payload).map_err(|error| {
+                Error::Protocol(format!(
+                    "failed to parse SQL Server PRELOGIN response: {error}"
+                ))
+            })?;
         let encrypted = negotiate_encryption(options.encrypt(), server_encrypt)?;
 
         if encrypted {
             stream.enable_tls(options).await?;
         }
 
-        let login = build_login7_packet(options).map_err(login_error)?;
-        stream.write_all(&login).await?;
+        let login = build_login7_packet(options).map_err(|error| {
+            Error::Protocol(format!("failed to build SQL Server LOGIN7 packet: {error}"))
+        })?;
+        stream
+            .write_all(&login)
+            .await
+            .map_err(|error| context_error("failed to send SQL Server LOGIN7 packet", error))?;
 
-        let login_response = stream.read_message().await?;
+        let login_response = stream
+            .read_message()
+            .await
+            .map_err(|error| context_error("failed to read SQL Server LOGIN7 response", error))?;
         if login_response.packet_type != PacketType::TABULAR_RESULT {
             return Err(Error::Protocol(format!(
                 "expected SQL Server LOGIN7 response as tabular result, got packet type 0x{:02x}",
@@ -72,7 +94,11 @@ impl MssqlConnection {
             )));
         }
 
-        match parse_login_response(&login_response.payload).map_err(token_error)? {
+        match parse_login_response(&login_response.payload).map_err(|error| {
+            Error::Protocol(format!(
+                "failed to parse SQL Server LOGIN7 response: {error}"
+            ))
+        })? {
             LoginResponse::Success { env_changes, .. } => {
                 let mut conn = Self {
                     stream: Some(stream),
@@ -133,9 +159,12 @@ impl MssqlConnection {
         let stream = self.stream.as_mut().ok_or_else(wire_not_implemented)?;
         let packet = build_sql_batch_packet(sql, stream.packet_size, transaction_descriptor)
             .map_err(frame_error)?;
-        stream.write_all(&packet).await?;
+        stream
+            .write_all(&packet)
+            .await
+            .map_err(|error| context_error("failed to send SQL Server SQL batch packet", error))?;
 
-        self.read_query_response().await
+        self.read_query_response("SQL batch").await
     }
 
     pub(crate) fn queue_rollback(&mut self) {
@@ -183,8 +212,10 @@ impl MssqlConnection {
                 .map_err(|error| {
                     Error::Protocol(format!("failed to encode SQL Server RPC: {error}"))
                 })?;
-                stream.write_all(&packet).await?;
-                self.read_query_response().await
+                stream.write_all(&packet).await.map_err(|error| {
+                    context_error("failed to send SQL Server RPC execute packet", error)
+                })?;
+                self.read_query_response("RPC execute").await
             }
             _ => self.run_sql_batch_direct(sql).await,
         }
@@ -204,9 +235,11 @@ impl MssqlConnection {
                 .map_err(|error| {
                     Error::Protocol(format!("failed to encode SQL Server prepare RPC: {error}"))
                 })?;
-        stream.write_all(&packet).await?;
+        stream.write_all(&packet).await.map_err(|error| {
+            context_error("failed to send SQL Server prepare RPC packet", error)
+        })?;
 
-        let output = self.read_query_response().await?;
+        let output = self.read_query_response("prepare RPC").await?;
 
         if let Some(statement_id) = first_i32_return_value(&output)? {
             let transaction_descriptor = self.transaction_descriptor;
@@ -218,16 +251,23 @@ impl MssqlConnection {
                             "failed to encode SQL Server unprepare RPC: {error}"
                         ))
                     })?;
-            stream.write_all(&packet).await?;
-            let _ = self.read_query_response().await?;
+            stream.write_all(&packet).await.map_err(|error| {
+                context_error("failed to send SQL Server unprepare RPC packet", error)
+            })?;
+            let _ = self.read_query_response("unprepare RPC").await?;
         }
 
         Ok(output)
     }
 
-    async fn read_query_response(&mut self) -> Result<QueryOutput, Error> {
+    async fn read_query_response(&mut self, operation: &'static str) -> Result<QueryOutput, Error> {
         let stream = self.stream.as_mut().ok_or_else(wire_not_implemented)?;
-        let response = stream.read_message().await?;
+        let response = stream.read_message().await.map_err(|error| {
+            context_error(
+                format!("failed to read SQL Server {operation} response"),
+                error,
+            )
+        })?;
         if response.packet_type != PacketType::TABULAR_RESULT {
             return Err(Error::Protocol(format!(
                 "expected SQL Server query response as tabular result, got packet type 0x{:02x}",
@@ -235,7 +275,11 @@ impl MssqlConnection {
             )));
         }
 
-        let output = parse_query_response(&response.payload)?;
+        let output = parse_query_response(&response.payload).map_err(|error| {
+            Error::Protocol(format!(
+                "failed to parse SQL Server {operation} response: {error}"
+            ))
+        })?;
         self.apply_env_changes(&output.env_changes);
         Ok(output)
     }
@@ -413,7 +457,21 @@ impl MssqlWireStream {
             (None, None) => 1433,
         };
 
-        let stream = TcpStream::connect((options.host(), port)).await?;
+        let stream = TcpStream::connect((options.host(), port))
+            .await
+            .map_err(|error| {
+                Error::Io(std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "failed to connect to SQL Server at {}:{port}{}: {error}",
+                        options.host(),
+                        options
+                            .instance()
+                            .map(|instance| format!(" (instance={instance})"))
+                            .unwrap_or_default()
+                    ),
+                ))
+            })?;
         let packet_size = usize::try_from(options.requested_packet_size()).map_err(|_| {
             Error::Protocol(format!(
                 "SQL Server packet size {} does not fit usize",
@@ -626,17 +684,32 @@ fn build_tls_connector(options: &MssqlConnectOptions) -> Result<TlsConnector, Er
     builder.danger_accept_invalid_hostnames(options.hostname_in_certificate().is_none());
 
     if let Some(path) = options.ssl_root_cert() {
-        let cert = std::fs::read(path).map_err(Error::Io)?;
+        let cert = std::fs::read(path).map_err(|error| {
+            Error::Io(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "failed to read SQL Server ssl_root_cert `{}`: {error}",
+                    path.display()
+                ),
+            ))
+        })?;
         let cert = Certificate::from_pem(&cert)
             .or_else(|_| Certificate::from_der(&cert))
-            .map_err(|error| Error::Tls(error.into()))?;
+            .map_err(|error| {
+                Error::Tls(
+                    format!(
+                        "failed to parse SQL Server ssl_root_cert `{}` as PEM or DER: {error}",
+                        path.display()
+                    )
+                    .into(),
+                )
+            })?;
         builder.add_root_certificate(cert);
     }
 
-    builder
-        .build()
-        .map(TlsConnector::from)
-        .map_err(|error| Error::Tls(error.into()))
+    builder.build().map(TlsConnector::from).map_err(|error| {
+        Error::Tls(format!("failed to build SQL Server TLS connector: {error}").into())
+    })
 }
 
 fn taken_stream_error() -> Error {
@@ -647,20 +720,22 @@ fn packet_error(error: crate::protocol::packet::PacketHeaderError) -> Error {
     Error::Protocol(error.to_string())
 }
 
-fn pre_login_error(error: PreLoginError) -> Error {
-    Error::Protocol(error.to_string())
-}
-
-fn login_error(error: Login7Error) -> Error {
-    Error::Protocol(error.to_string())
-}
-
-fn token_error(error: TokenParseError) -> Error {
-    Error::Protocol(error.to_string())
-}
-
 fn frame_error(error: crate::protocol::packet::PacketFrameError) -> Error {
     Error::Protocol(error.to_string())
+}
+
+fn context_error(context: impl Into<String>, error: Error) -> Error {
+    let context = context.into();
+
+    match error {
+        Error::Io(error) => Error::Io(std::io::Error::new(
+            error.kind(),
+            format!("{context}: {error}"),
+        )),
+        Error::Tls(error) => Error::Tls(format!("{context}: {error}").into()),
+        Error::Protocol(message) => Error::Protocol(format!("{context}: {message}")),
+        error => Error::Protocol(format!("{context}: {error}")),
+    }
 }
 
 fn stream_query_output(
