@@ -1,0 +1,59 @@
+use sqlx_core::column::{Column, ColumnIndex};
+use sqlx_core::error::Error;
+use sqlx_core::row::Row;
+
+use crate::{Mssql, MssqlColumn, MssqlValueRef};
+
+/// SQL Server row skeleton.
+#[derive(Debug, Default, Clone)]
+pub struct MssqlRow {
+    columns: Vec<MssqlColumn>,
+}
+
+impl MssqlRow {
+    /// Creates an empty row skeleton.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+}
+
+impl Row for MssqlRow {
+    type Database = Mssql;
+
+    fn columns(&self) -> &[MssqlColumn] {
+        &self.columns
+    }
+
+    fn try_get_raw<I>(&self, index: I) -> Result<MssqlValueRef<'_>, Error>
+    where
+        I: ColumnIndex<Self>,
+    {
+        let index = index.index(self)?;
+        Err(Error::ColumnDecode {
+            index: index.to_string(),
+            source: "SQL Server row decoding is not implemented yet".into(),
+        })
+    }
+}
+
+impl ColumnIndex<MssqlRow> for usize {
+    fn index(&self, row: &MssqlRow) -> Result<usize, Error> {
+        if *self >= row.columns.len() {
+            return Err(Error::ColumnIndexOutOfBounds {
+                index: *self,
+                len: row.columns.len(),
+            });
+        }
+
+        Ok(*self)
+    }
+}
+
+impl ColumnIndex<MssqlRow> for &'_ str {
+    fn index(&self, row: &MssqlRow) -> Result<usize, Error> {
+        row.columns
+            .iter()
+            .position(|column| column.name() == *self)
+            .ok_or_else(|| Error::ColumnNotFound((*self).to_owned()))
+    }
+}
