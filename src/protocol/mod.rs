@@ -10,3 +10,6 @@ pub(crate) mod query;
 pub(crate) mod rpc;
 /// Bounded tabular-result token parsing helpers.
 pub mod token;
+/// TDS TYPE_INFO parsing and value length-prefix helpers.
+#[allow(dead_code)]
+pub mod type_info;
