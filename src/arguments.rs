@@ -146,6 +146,7 @@ pub(crate) fn write_null_nvarchar_parameter(
 pub(crate) fn type_declaration(type_info: &MssqlTypeInfo) -> Result<&'static str, BoxDynError> {
     Ok(match type_info.kind() {
         MssqlType::Bit => "bit",
+        MssqlType::TinyInt => "tinyint",
         MssqlType::SmallInt => "smallint",
         MssqlType::Int => "int",
         MssqlType::BigInt => "bigint",
@@ -166,6 +167,10 @@ fn write_type_info(
     match type_info.kind() {
         MssqlType::Bit => {
             out.push(DATA_TYPE_BITN);
+            out.push(1);
+        }
+        MssqlType::TinyInt => {
+            out.push(DATA_TYPE_INTN);
             out.push(1);
         }
         MssqlType::SmallInt => {
@@ -211,6 +216,7 @@ fn write_param_len_data(
 ) -> Result<(), BoxDynError> {
     match type_info.kind() {
         MssqlType::Bit
+        | MssqlType::TinyInt
         | MssqlType::SmallInt
         | MssqlType::Int
         | MssqlType::BigInt
@@ -247,6 +253,7 @@ fn declaration(
 ) -> Result<String, BoxDynError> {
     Ok(match type_info.kind() {
         MssqlType::Bit => "bit".to_owned(),
+        MssqlType::TinyInt => "tinyint".to_owned(),
         MssqlType::SmallInt => "smallint".to_owned(),
         MssqlType::Int => "int".to_owned(),
         MssqlType::BigInt => "bigint".to_owned(),
@@ -327,5 +334,28 @@ mod tests {
             .data()
             .windows(8)
             .any(|bytes| bytes == [DATA_TYPE_NVARCHAR, 4, 0, 0x81, 0x04, 0xd0, 0x00, 0x34]));
+    }
+
+    #[test]
+    fn declares_lossless_integer_parameter_types() {
+        let mut args = MssqlArguments::default();
+
+        args.add(-5_i8).unwrap();
+        args.add(255_u8).unwrap();
+        args.add(65_535_u16).unwrap();
+        args.add(u32::MAX).unwrap();
+
+        assert_eq!(
+            "@p1 smallint,@p2 tinyint,@p3 int,@p4 bigint",
+            args.declarations()
+        );
+        assert!(args
+            .data()
+            .windows(2)
+            .any(|bytes| bytes == [DATA_TYPE_INTN, 1]));
+        assert!(args
+            .data()
+            .windows(2)
+            .any(|bytes| bytes == [DATA_TYPE_INTN, 8]));
     }
 }
