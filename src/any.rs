@@ -253,7 +253,7 @@ impl<'a> TryFrom<&'a MssqlTypeInfo> for AnyTypeInfo {
             MssqlType::BigInt => AnyTypeInfoKind::BigInt,
             MssqlType::Real => AnyTypeInfoKind::Real,
             MssqlType::Float => AnyTypeInfoKind::Double,
-            MssqlType::NVarChar => AnyTypeInfoKind::Text,
+            MssqlType::NVarChar | MssqlType::VarChar => AnyTypeInfoKind::Text,
             MssqlType::VarBinary => AnyTypeInfoKind::Blob,
             MssqlType::TinyInt | MssqlType::Other(_) => {
                 return Err(Error::AnyDriverError(
@@ -300,6 +300,12 @@ mod tests {
         );
         assert_eq!(
             AnyTypeInfo::try_from(&MssqlTypeInfo::NVARCHAR)
+                .unwrap()
+                .kind(),
+            AnyTypeInfoKind::Text
+        );
+        assert_eq!(
+            AnyTypeInfo::try_from(&MssqlTypeInfo::VARCHAR)
                 .unwrap()
                 .kind(),
             AnyTypeInfoKind::Text

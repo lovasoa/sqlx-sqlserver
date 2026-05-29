@@ -376,7 +376,7 @@ impl Type<Mssql> for str {
     }
 
     fn compatible(ty: &MssqlTypeInfo) -> bool {
-        matches!(ty.kind(), MssqlType::NVarChar)
+        matches!(ty.kind(), MssqlType::NVarChar | MssqlType::VarChar)
     }
 }
 
@@ -417,6 +417,10 @@ impl Decode<'_, Mssql> for String {
         let bytes = value
             .as_bytes()
             .ok_or_else(|| "cannot decode SQL Server NULL as String".to_owned())?;
+
+        if matches!(value.type_info.kind(), MssqlType::VarChar) {
+            return Ok(std::str::from_utf8(bytes)?.to_owned());
+        }
 
         if bytes.len() % 2 != 0 {
             return Err("cannot decode odd-length SQL Server UTF-16 text".into());
@@ -525,5 +529,30 @@ mod tests {
         let bytes = <&[u8] as Decode<Mssql>>::decode(value.as_ref()).unwrap();
 
         assert_eq!(&[1, 2, 3, 4], bytes);
+    }
+
+    #[test]
+    fn decodes_ascii_varchar_as_utf8() {
+        let value = MssqlValue::new(MssqlTypeInfo::VARCHAR, Some(b"hello".to_vec()));
+
+        assert_eq!(
+            "hello",
+            <String as Decode<Mssql>>::decode(value.as_ref()).unwrap()
+        );
+    }
+
+    #[test]
+    fn decodes_nvarchar_as_utf16() {
+        let mut data = Vec::new();
+        for unit in "hello".encode_utf16() {
+            data.extend_from_slice(&unit.to_le_bytes());
+        }
+
+        let value = MssqlValue::new(MssqlTypeInfo::NVARCHAR, Some(data));
+
+        assert_eq!(
+            "hello",
+            <String as Decode<Mssql>>::decode(value.as_ref()).unwrap()
+        );
     }
 }

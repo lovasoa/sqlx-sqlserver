@@ -25,6 +25,8 @@ pub enum MssqlType {
     Float,
     /// Unicode text such as `nvarchar`.
     NVarChar,
+    /// Non-Unicode text such as `varchar`.
+    VarChar,
     /// Binary data such as `varbinary`.
     VarBinary,
     /// A type not yet mapped by this skeleton.
@@ -78,6 +80,8 @@ impl MssqlTypeInfo {
     pub const FLOAT: Self = Self::new(MssqlType::Float);
     /// SQL Server Unicode text type information.
     pub const NVARCHAR: Self = Self::new(MssqlType::NVarChar);
+    /// SQL Server non-Unicode text type information.
+    pub const VARCHAR: Self = Self::new(MssqlType::VarChar);
     /// SQL Server binary type information.
     pub const VARBINARY: Self = Self::new(MssqlType::VarBinary);
 
@@ -103,12 +107,11 @@ impl MssqlTypeInfo {
                 8 => MssqlType::Float,
                 _ => MssqlType::Other(type_info.name().to_owned()),
             },
-            protocol::DataType::NVarChar
-            | protocol::DataType::NChar
-            | protocol::DataType::VarChar
+            protocol::DataType::NVarChar | protocol::DataType::NChar => MssqlType::NVarChar,
+            protocol::DataType::VarChar
             | protocol::DataType::Char
             | protocol::DataType::BigVarChar
-            | protocol::DataType::BigChar => MssqlType::NVarChar,
+            | protocol::DataType::BigChar => MssqlType::VarChar,
             protocol::DataType::VarBinary
             | protocol::DataType::Binary
             | protocol::DataType::BigVarBinary
@@ -141,6 +144,7 @@ impl TypeInfo for MssqlTypeInfo {
             MssqlType::Real => "REAL",
             MssqlType::Float => "FLOAT",
             MssqlType::NVarChar => "NVARCHAR",
+            MssqlType::VarChar => "VARCHAR",
             MssqlType::VarBinary => "VARBINARY",
             MssqlType::Other(name) => name,
         }
@@ -165,6 +169,7 @@ mod tests {
     fn exposes_sql_server_type_names() {
         assert_eq!("INT", MssqlTypeInfo::INT.name());
         assert_eq!("NVARCHAR", MssqlTypeInfo::NVARCHAR.to_string());
+        assert_eq!("VARCHAR", MssqlTypeInfo::VARCHAR.to_string());
     }
 
     #[test]
@@ -172,5 +177,27 @@ mod tests {
         assert!(MssqlTypeInfo::NULL.type_compatible(&MssqlTypeInfo::INT));
         assert!(MssqlTypeInfo::NVARCHAR.type_compatible(&MssqlTypeInfo::NULL));
         assert!(!MssqlTypeInfo::INT.type_compatible(&MssqlTypeInfo::BIGINT));
+    }
+
+    #[test]
+    fn maps_unicode_and_non_unicode_protocol_text_separately() {
+        assert_eq!(
+            MssqlType::NVarChar,
+            MssqlTypeInfo::from_protocol(&protocol::TypeInfo::new(protocol::DataType::NVarChar, 8))
+                .kind
+        );
+        assert_eq!(
+            MssqlType::VarChar,
+            MssqlTypeInfo::from_protocol(&protocol::TypeInfo::new(protocol::DataType::VarChar, 8))
+                .kind
+        );
+        assert_eq!(
+            MssqlType::VarChar,
+            MssqlTypeInfo::from_protocol(&protocol::TypeInfo::new(
+                protocol::DataType::BigVarChar,
+                8,
+            ))
+            .kind
+        );
     }
 }

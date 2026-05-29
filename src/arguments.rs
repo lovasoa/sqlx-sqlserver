@@ -11,6 +11,7 @@ const DATA_TYPE_INTN: u8 = 0x26;
 const DATA_TYPE_BITN: u8 = 0x68;
 const DATA_TYPE_FLOATN: u8 = 0x6d;
 const DATA_TYPE_BIGVARBINARY: u8 = 0xa5;
+const DATA_TYPE_BIGVARCHAR: u8 = 0xa7;
 const DATA_TYPE_NVARCHAR: u8 = 0xe7;
 const DEFAULT_COLLATION: [u8; 5] = [0x81, 0x04, 0xd0, 0x00, 0x34];
 const STATUS_BY_REF_VALUE: u8 = 0x01;
@@ -153,6 +154,7 @@ pub(crate) fn type_declaration(type_info: &MssqlTypeInfo) -> Result<&'static str
         MssqlType::Real => "real",
         MssqlType::Float => "float",
         MssqlType::NVarChar => "nvarchar(max)",
+        MssqlType::VarChar => "varchar(max)",
         MssqlType::VarBinary => "varbinary(max)",
         other => return Err(format!("SQL Server arguments do not support type {other:?}").into()),
     })
@@ -198,6 +200,11 @@ fn write_type_info(
             out.extend_from_slice(&nvarchar_type_size(encoded_len, is_null)?.to_le_bytes());
             out.extend_from_slice(&DEFAULT_COLLATION);
         }
+        MssqlType::VarChar => {
+            out.push(DATA_TYPE_BIGVARCHAR);
+            out.extend_from_slice(&bounded_short_len(encoded_len, is_null)?.to_le_bytes());
+            out.extend_from_slice(&DEFAULT_COLLATION);
+        }
         MssqlType::VarBinary => {
             out.push(DATA_TYPE_BIGVARBINARY);
             out.extend_from_slice(&bounded_short_len(encoded_len, is_null)?.to_le_bytes());
@@ -228,7 +235,7 @@ fn write_param_len_data(
                 u8::try_from(encoded.len())?
             });
         }
-        MssqlType::NVarChar | MssqlType::VarBinary => {
+        MssqlType::NVarChar | MssqlType::VarChar | MssqlType::VarBinary => {
             let len = if is_null {
                 u16::MAX
             } else {
@@ -260,6 +267,7 @@ fn declaration(
         MssqlType::Real => "real".to_owned(),
         MssqlType::Float => "float".to_owned(),
         MssqlType::NVarChar => format!("nvarchar({})", nvarchar_chars(encoded_len, is_null)?),
+        MssqlType::VarChar => format!("varchar({})", bounded_short_len(encoded_len, is_null)?),
         MssqlType::VarBinary => format!("varbinary({})", bounded_short_len(encoded_len, is_null)?),
         other => return Err(format!("SQL Server arguments do not support type {other:?}").into()),
     })

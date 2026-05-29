@@ -138,6 +138,23 @@ async fn fetches_bound_scalars_when_configured() -> Result<(), Box<dyn std::erro
 
 #[cfg(feature = "integration-tests")]
 #[tokio::test]
+async fn fetches_varchar_text_when_configured() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = native_test_conn("SQL Server varchar decode test").await? else {
+        return Ok(());
+    };
+
+    let row = sqlx_core::query::query("SELECT CAST('hello' AS VARCHAR(5))")
+        .fetch_one(&mut conn)
+        .await?;
+
+    assert_eq!("hello", row.try_get::<String, _>(0)?);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[cfg(feature = "integration-tests")]
+#[tokio::test]
 async fn fetches_bound_null_when_configured() -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = native_test_conn("SQL Server bound null test").await? else {
         return Ok(());
