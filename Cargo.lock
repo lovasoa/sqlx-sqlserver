@@ -517,6 +517,8 @@ name = "sqlx-sqlserver"
 version = "0.1.0"
 dependencies = [
  "dotenvy",
+ "futures-core",
+ "futures-util",
  "log",
  "percent-encoding",
  "sqlx-core",

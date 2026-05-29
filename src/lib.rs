@@ -23,6 +23,7 @@
 
 #![warn(future_incompatible, rust_2018_idioms)]
 
+pub mod any;
 mod arguments;
 mod column;
 mod connection;
