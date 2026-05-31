@@ -10,16 +10,57 @@ use num_bigint::{BigInt, Sign};
 use rust_decimal::Decimal;
 #[cfg(feature = "json")]
 use serde::{Deserialize, Serialize};
+#[cfg(any(
+    feature = "bigdecimal",
+    feature = "chrono",
+    feature = "decimal",
+    feature = "json",
+    feature = "time",
+    feature = "uuid"
+))]
 use sqlx_core::decode::Decode;
+#[cfg(any(
+    feature = "bigdecimal",
+    feature = "chrono",
+    feature = "decimal",
+    feature = "json",
+    feature = "time",
+    feature = "uuid"
+))]
 use sqlx_core::encode::{Encode, IsNull};
+#[cfg(any(
+    feature = "bigdecimal",
+    feature = "chrono",
+    feature = "decimal",
+    feature = "json",
+    feature = "time",
+    feature = "uuid"
+))]
 use sqlx_core::error::BoxDynError;
 #[cfg(feature = "json")]
 use sqlx_core::types::Json;
+#[cfg(any(
+    feature = "bigdecimal",
+    feature = "chrono",
+    feature = "decimal",
+    feature = "json",
+    feature = "time",
+    feature = "uuid"
+))]
 use sqlx_core::types::Type;
 #[cfg(feature = "uuid")]
 use uuid::Uuid;
 
+#[cfg(any(feature = "bigdecimal", feature = "decimal"))]
 use crate::decimal_tools::{decode_money_bytes, decode_numeric_bytes};
+#[cfg(any(
+    feature = "bigdecimal",
+    feature = "chrono",
+    feature = "decimal",
+    feature = "json",
+    feature = "time",
+    feature = "uuid"
+))]
 use crate::{Mssql, MssqlType, MssqlTypeInfo, MssqlValueRef};
 
 #[cfg(feature = "decimal")]
@@ -474,12 +515,21 @@ impl Decode<'_, Mssql> for time::OffsetDateTime {
     }
 }
 
+#[cfg(any(
+    feature = "bigdecimal",
+    feature = "chrono",
+    feature = "decimal",
+    feature = "json",
+    feature = "time",
+    feature = "uuid"
+))]
 fn non_null_bytes<'r>(value: MssqlValueRef<'r>, rust_type: &str) -> Result<&'r [u8], BoxDynError> {
     value
         .as_bytes()
         .ok_or_else(|| format!("cannot decode SQL Server NULL as {rust_type}").into())
 }
 
+#[cfg(any(feature = "chrono", feature = "time"))]
 fn read_i24_le(bytes: &[u8]) -> i32 {
     let mut value = i32::from(bytes[0]) | (i32::from(bytes[1]) << 8) | (i32::from(bytes[2]) << 16);
     if value & 0x80_0000 != 0 {
@@ -488,6 +538,7 @@ fn read_i24_le(bytes: &[u8]) -> i32 {
     value
 }
 
+#[cfg(any(feature = "chrono", feature = "time"))]
 fn write_i24_le(value: i32) -> [u8; 3] {
     let bytes = value.to_le_bytes();
     [bytes[0], bytes[1], bytes[2]]

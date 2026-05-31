@@ -208,6 +208,7 @@ impl MssqlTypeInfo {
         },
     );
 
+    #[cfg(any(feature = "bigdecimal", feature = "decimal"))]
     pub(crate) const fn decimal_with_scale(scale: u8) -> Self {
         Self::with_protocol(
             MssqlType::Decimal,

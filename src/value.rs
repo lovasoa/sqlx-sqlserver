@@ -81,6 +81,14 @@ impl<'r> MssqlValueRef<'r> {
         self.data
     }
 
+    #[cfg(any(
+        feature = "bigdecimal",
+        feature = "chrono",
+        feature = "decimal",
+        feature = "json",
+        feature = "time",
+        feature = "uuid"
+    ))]
     pub(crate) fn mssql_type_info(&self) -> &'r MssqlTypeInfo {
         self.type_info
     }
@@ -155,16 +163,24 @@ fn decode_money_f64(bytes: &[u8]) -> Result<f64, BoxDynError> {
     Ok(integer_part + fractional_part)
 }
 
+fn is_integer_compatible(ty: &MssqlTypeInfo) -> bool {
+    matches!(
+        ty.kind(),
+        MssqlType::TinyInt
+            | MssqlType::SmallInt
+            | MssqlType::Int
+            | MssqlType::BigInt
+            | MssqlType::Decimal
+    )
+}
+
 impl Type<Mssql> for i8 {
     fn type_info() -> MssqlTypeInfo {
         MssqlTypeInfo::SMALLINT
     }
 
     fn compatible(ty: &MssqlTypeInfo) -> bool {
-        matches!(
-            ty.kind(),
-            MssqlType::TinyInt | MssqlType::SmallInt | MssqlType::Int | MssqlType::BigInt
-        )
+        is_integer_compatible(ty)
     }
 }
 
@@ -186,10 +202,7 @@ impl Type<Mssql> for u8 {
     }
 
     fn compatible(ty: &MssqlTypeInfo) -> bool {
-        matches!(
-            ty.kind(),
-            MssqlType::TinyInt | MssqlType::SmallInt | MssqlType::Int | MssqlType::BigInt
-        )
+        is_integer_compatible(ty)
     }
 }
 
@@ -212,10 +225,7 @@ impl Type<Mssql> for i32 {
     }
 
     fn compatible(ty: &MssqlTypeInfo) -> bool {
-        matches!(
-            ty.kind(),
-            MssqlType::TinyInt | MssqlType::SmallInt | MssqlType::Int
-        )
+        is_integer_compatible(ty)
     }
 }
 
@@ -263,7 +273,7 @@ impl Type<Mssql> for i16 {
     }
 
     fn compatible(ty: &MssqlTypeInfo) -> bool {
-        matches!(ty.kind(), MssqlType::TinyInt | MssqlType::SmallInt)
+        is_integer_compatible(ty)
     }
 }
 
@@ -286,10 +296,7 @@ impl Type<Mssql> for u16 {
     }
 
     fn compatible(ty: &MssqlTypeInfo) -> bool {
-        matches!(
-            ty.kind(),
-            MssqlType::TinyInt | MssqlType::SmallInt | MssqlType::Int | MssqlType::BigInt
-        )
+        is_integer_compatible(ty)
     }
 }
 
@@ -317,10 +324,7 @@ impl Type<Mssql> for u32 {
     }
 
     fn compatible(ty: &MssqlTypeInfo) -> bool {
-        matches!(
-            ty.kind(),
-            MssqlType::TinyInt | MssqlType::SmallInt | MssqlType::Int | MssqlType::BigInt
-        )
+        is_integer_compatible(ty)
     }
 }
 
@@ -342,10 +346,7 @@ impl Type<Mssql> for u64 {
     }
 
     fn compatible(ty: &MssqlTypeInfo) -> bool {
-        matches!(
-            ty.kind(),
-            MssqlType::TinyInt | MssqlType::SmallInt | MssqlType::Int | MssqlType::BigInt
-        )
+        is_integer_compatible(ty)
     }
 }
 
@@ -368,10 +369,7 @@ impl Type<Mssql> for i64 {
     }
 
     fn compatible(ty: &MssqlTypeInfo) -> bool {
-        matches!(
-            ty.kind(),
-            MssqlType::TinyInt | MssqlType::SmallInt | MssqlType::Int | MssqlType::BigInt
-        )
+        is_integer_compatible(ty)
     }
 }
 
@@ -661,6 +659,19 @@ mod tests {
 
         let too_large = MssqlValue::new(MssqlTypeInfo::INT, Some(128_i32.to_le_bytes().to_vec()));
         assert!(<i8 as Decode<Mssql>>::decode(too_large.as_ref()).is_err());
+    }
+
+    #[test]
+    fn integer_scalars_are_compatible_with_decimal() {
+        let mut numeric = vec![1_u8];
+        numeric.extend_from_slice(&42_u128.to_le_bytes());
+        let value = MssqlValue::new(MssqlTypeInfo::DECIMAL, Some(numeric));
+
+        assert!(<i64 as Type<Mssql>>::compatible(&MssqlTypeInfo::DECIMAL));
+        assert_eq!(
+            42_i64,
+            <i64 as Decode<Mssql>>::decode(value.as_ref()).unwrap()
+        );
     }
 
     #[test]
