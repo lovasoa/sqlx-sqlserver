@@ -6,6 +6,7 @@ use sqlx_core::error::BoxDynError;
 use sqlx_core::types::Type;
 use sqlx_core::value::{Value, ValueRef};
 
+use crate::decimal_tools::{decode_money_bytes, decode_numeric_bytes};
 use crate::{Mssql, MssqlType, MssqlTypeInfo};
 
 /// Owned SQL Server value skeleton.
@@ -79,6 +80,10 @@ impl<'r> MssqlValueRef<'r> {
     pub(crate) fn as_bytes(&self) -> Option<&'r [u8]> {
         self.data
     }
+
+    pub(crate) fn mssql_type_info(&self) -> &'r MssqlTypeInfo {
+        self.type_info
+    }
 }
 
 fn non_null_bytes<'r>(value: MssqlValueRef<'r>, rust_type: &str) -> Result<&'r [u8], BoxDynError> {
@@ -89,6 +94,10 @@ fn non_null_bytes<'r>(value: MssqlValueRef<'r>, rust_type: &str) -> Result<&'r [
 
 fn decode_integer(value: MssqlValueRef<'_>, rust_type: &str) -> Result<i64, BoxDynError> {
     let bytes = non_null_bytes(value, rust_type)?;
+
+    if matches!(value.type_info.kind(), MssqlType::Decimal) {
+        return decode_numeric_integer(bytes, value.type_info.scale());
+    }
 
     match bytes.len() {
         1 => Ok(i64::from(bytes[0])),
@@ -101,6 +110,49 @@ fn decode_integer(value: MssqlValueRef<'_>, rust_type: &str) -> Result<i64, BoxD
         ])),
         len => Err(format!("cannot decode {len}-byte SQL Server integer as {rust_type}").into()),
     }
+}
+
+fn decode_numeric_integer(bytes: &[u8], mut scale: u8) -> Result<i64, BoxDynError> {
+    let (sign, mut numerator) = decode_numeric_bytes(bytes)?;
+
+    while numerator % 10 == 0 && scale > 0 {
+        numerator /= 10;
+        scale -= 1;
+    }
+
+    if scale > 0 {
+        numerator /= 10_u128.pow(u32::from(scale));
+    }
+
+    let value = i64::try_from(numerator)?;
+    Ok(value * i64::from(sign))
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn decode_numeric_f64(bytes: &[u8], mut scale: u8) -> Result<f64, BoxDynError> {
+    let (sign, mut numerator) = decode_numeric_bytes(bytes)?;
+
+    while numerator % 10 == 0 && scale > 0 {
+        numerator /= 10;
+        scale -= 1;
+    }
+
+    let denominator = 10_u128.pow(u32::from(scale));
+    let integer_part = (numerator / denominator) as f64;
+    let fractional_part = (numerator % denominator) as f64 / denominator as f64;
+    let absolute = integer_part + fractional_part;
+
+    Ok(if sign == 1 { absolute } else { -absolute })
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn decode_money_f64(bytes: &[u8]) -> Result<f64, BoxDynError> {
+    let numerator = decode_money_bytes(bytes)?;
+    let denominator = 10_000;
+    let integer_part = (numerator / denominator) as f64;
+    let fractional_part = (numerator % denominator) as f64 / denominator as f64;
+
+    Ok(integer_part + fractional_part)
 }
 
 impl Type<Mssql> for i8 {
@@ -284,6 +336,32 @@ impl Decode<'_, Mssql> for u32 {
     }
 }
 
+impl Type<Mssql> for u64 {
+    fn type_info() -> MssqlTypeInfo {
+        MssqlTypeInfo::BIGINT
+    }
+
+    fn compatible(ty: &MssqlTypeInfo) -> bool {
+        matches!(
+            ty.kind(),
+            MssqlType::TinyInt | MssqlType::SmallInt | MssqlType::Int | MssqlType::BigInt
+        )
+    }
+}
+
+impl Encode<'_, Mssql> for u64 {
+    fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
+        let value = i64::try_from(*self)?;
+        <i64 as Encode<Mssql>>::encode_by_ref(&value, buf)
+    }
+}
+
+impl Decode<'_, Mssql> for u64 {
+    fn decode(value: MssqlValueRef<'_>) -> Result<Self, BoxDynError> {
+        Ok(u64::try_from(decode_integer(value, "u64")?)?)
+    }
+}
+
 impl Type<Mssql> for i64 {
     fn type_info() -> MssqlTypeInfo {
         MssqlTypeInfo::BIGINT
@@ -316,7 +394,7 @@ impl Type<Mssql> for f32 {
     }
 
     fn compatible(ty: &MssqlTypeInfo) -> bool {
-        matches!(ty.kind(), MssqlType::Real)
+        <f64 as Type<Mssql>>::compatible(ty)
     }
 }
 
@@ -329,6 +407,10 @@ impl Encode<'_, Mssql> for f32 {
 
 impl Decode<'_, Mssql> for f32 {
     fn decode(value: MssqlValueRef<'_>) -> Result<Self, BoxDynError> {
+        if !matches!(value.type_info.kind(), MssqlType::Real) {
+            return Ok(<f64 as Decode<Mssql>>::decode(value)? as f32);
+        }
+
         let bytes = value
             .as_bytes()
             .ok_or_else(|| "cannot decode SQL Server NULL as f32".to_owned())?;
@@ -346,12 +428,23 @@ impl Type<Mssql> for f64 {
     }
 
     fn compatible(ty: &MssqlTypeInfo) -> bool {
-        matches!(ty.kind(), MssqlType::Real | MssqlType::Float)
+        matches!(
+            ty.kind(),
+            MssqlType::Real | MssqlType::Float | MssqlType::Decimal | MssqlType::Money
+        )
     }
 }
 
 impl Decode<'_, Mssql> for f64 {
     fn decode(value: MssqlValueRef<'_>) -> Result<Self, BoxDynError> {
+        if matches!(value.type_info.kind(), MssqlType::Decimal) {
+            return decode_numeric_f64(non_null_bytes(value, "f64")?, value.type_info.scale());
+        }
+
+        if matches!(value.type_info.kind(), MssqlType::Money) {
+            return decode_money_f64(non_null_bytes(value, "f64")?);
+        }
+
         match value
             .as_bytes()
             .ok_or_else(|| "cannot decode SQL Server NULL as f64".to_owned())?

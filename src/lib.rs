@@ -75,6 +75,7 @@ mod arguments;
 mod column;
 mod connection;
 mod database;
+mod decimal_tools;
 mod error;
 #[cfg(feature = "migrate")]
 mod migrate;
@@ -88,6 +89,7 @@ mod statement;
 mod tls;
 mod transaction;
 mod type_info;
+mod types;
 mod value;
 
 pub use arguments::MssqlArguments;

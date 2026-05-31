@@ -10,6 +10,12 @@ use crate::{Mssql, MssqlType, MssqlTypeInfo};
 const DATA_TYPE_INTN: u8 = 0x26;
 const DATA_TYPE_BITN: u8 = 0x68;
 const DATA_TYPE_FLOATN: u8 = 0x6d;
+const DATA_TYPE_GUID: u8 = 0x24;
+const DATA_TYPE_NUMERICN: u8 = 0x6c;
+const DATA_TYPE_DATEN: u8 = 0x28;
+const DATA_TYPE_TIMEN: u8 = 0x29;
+const DATA_TYPE_DATETIME2N: u8 = 0x2a;
+const DATA_TYPE_DATETIMEOFFSETN: u8 = 0x2b;
 const DATA_TYPE_BIGVARBINARY: u8 = 0xa5;
 const DATA_TYPE_BIGVARCHAR: u8 = 0xa7;
 const DATA_TYPE_NVARCHAR: u8 = 0xe7;
@@ -158,6 +164,12 @@ pub(crate) fn type_declaration(type_info: &MssqlTypeInfo) -> Result<&'static str
         MssqlType::NVarChar => "nvarchar(max)",
         MssqlType::VarChar => "varchar(max)",
         MssqlType::VarBinary => "varbinary(max)",
+        MssqlType::Decimal => "decimal(38, 0)",
+        MssqlType::Date => "date",
+        MssqlType::Time => "time(7)",
+        MssqlType::DateTime2 => "datetime2(7)",
+        MssqlType::DateTimeOffset => "datetimeoffset(7)",
+        MssqlType::UniqueIdentifier => "uniqueidentifier",
         other => return Err(format!("SQL Server arguments do not support type {other:?}").into()),
     })
 }
@@ -217,6 +229,31 @@ fn write_type_info(
                 &bounded_short_len(type_info, encoded_len, is_null)?.to_le_bytes(),
             );
         }
+        MssqlType::Decimal => {
+            out.push(DATA_TYPE_NUMERICN);
+            out.push(u8::try_from(type_info.size().unwrap_or(17))?);
+            out.push(type_info.precision().max(1));
+            out.push(type_info.scale());
+        }
+        MssqlType::Date => {
+            out.push(DATA_TYPE_DATEN);
+        }
+        MssqlType::Time => {
+            out.push(DATA_TYPE_TIMEN);
+            out.push(type_info.scale());
+        }
+        MssqlType::DateTime2 => {
+            out.push(DATA_TYPE_DATETIME2N);
+            out.push(type_info.scale());
+        }
+        MssqlType::DateTimeOffset => {
+            out.push(DATA_TYPE_DATETIMEOFFSETN);
+            out.push(type_info.scale());
+        }
+        MssqlType::UniqueIdentifier => {
+            out.push(DATA_TYPE_GUID);
+            out.push(16);
+        }
         other => return Err(format!("SQL Server arguments do not support type {other:?}").into()),
     }
 
@@ -236,7 +273,13 @@ fn write_param_len_data(
         | MssqlType::Int
         | MssqlType::BigInt
         | MssqlType::Real
-        | MssqlType::Float => {
+        | MssqlType::Float
+        | MssqlType::Decimal
+        | MssqlType::Date
+        | MssqlType::Time
+        | MssqlType::DateTime2
+        | MssqlType::DateTimeOffset
+        | MssqlType::UniqueIdentifier => {
             out.push(if is_null {
                 0
             } else {
@@ -281,6 +324,16 @@ fn declaration(
         MssqlType::NVarChar => nvarchar_declaration(type_info, encoded_len, is_null)?,
         MssqlType::VarChar => varchar_declaration(type_info, encoded_len, is_null)?,
         MssqlType::VarBinary => varbinary_declaration(type_info, encoded_len, is_null)?,
+        MssqlType::Decimal => format!(
+            "decimal({},{})",
+            type_info.precision().max(1),
+            type_info.scale()
+        ),
+        MssqlType::Date => "date".to_owned(),
+        MssqlType::Time => format!("time({})", type_info.scale()),
+        MssqlType::DateTime2 => format!("datetime2({})", type_info.scale()),
+        MssqlType::DateTimeOffset => format!("datetimeoffset({})", type_info.scale()),
+        MssqlType::UniqueIdentifier => "uniqueidentifier".to_owned(),
         other => return Err(format!("SQL Server arguments do not support type {other:?}").into()),
     })
 }

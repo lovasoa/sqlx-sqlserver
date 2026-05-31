@@ -271,6 +271,240 @@ async fn fetches_varchar_text_when_configured() -> Result<(), Box<dyn std::error
 
 #[cfg(feature = "integration-tests")]
 #[tokio::test]
+async fn fetches_old_numeric_float_and_integer_behaviors_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut conn) = native_test_conn("SQL Server numeric behavior test").await? else {
+        return Ok(());
+    };
+
+    let row = sqlx_core::query::query(
+        "SELECT CAST(0.5678 AS NUMERIC(10,4)), CAST(939399419.1225182 AS DECIMAL(15,2)), CAST(123456789 AS DECIMAL(15,0)), CAST(-123456789 AS DECIMAL(15,0)), CAST('0.0001' AS MONEY)",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+
+    assert_eq!(0.5678_f64, row.try_get::<f64, _>(0)?);
+    assert_eq!(939_399_419.12_f64, row.try_get::<f64, _>(1)?);
+    assert_eq!(123_456_789_i64, row.try_get::<i64, _>(2)?);
+    assert_eq!(-123_456_789_i64, row.try_get::<i64, _>(3)?);
+    assert_eq!(0.0001_f64, row.try_get::<f64, _>(4)?);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[cfg(all(feature = "integration-tests", feature = "decimal"))]
+#[tokio::test]
+async fn fetches_rust_decimal_numeric_and_money_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rust_decimal::Decimal;
+
+    let Some(mut conn) = native_test_conn("SQL Server rust_decimal type test").await? else {
+        return Ok(());
+    };
+
+    let row = sqlx_core::query::query(
+        "SELECT CAST('123456789.987654321' AS DECIMAL(18,9)), CAST('-1' AS DECIMAL(1,0)), CAST('922337203685477.5807' AS MONEY), CAST('-214748.3648' AS SMALLMONEY)",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+
+    assert_eq!(
+        Decimal::from_str_exact("123456789.987654321")?,
+        row.try_get::<Decimal, _>(0)?
+    );
+    assert_eq!(
+        Decimal::from_str_exact("-1")?,
+        row.try_get::<Decimal, _>(1)?
+    );
+    assert_eq!(
+        Decimal::from_str_exact("922337203685477.5807")?,
+        row.try_get::<Decimal, _>(2)?
+    );
+    assert_eq!(
+        Decimal::from_str_exact("-214748.3648")?,
+        row.try_get::<Decimal, _>(3)?
+    );
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[cfg(all(feature = "integration-tests", feature = "bigdecimal"))]
+#[tokio::test]
+async fn fetches_bigdecimal_numeric_and_money_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use bigdecimal::BigDecimal;
+    use std::str::FromStr;
+
+    let Some(mut conn) = native_test_conn("SQL Server bigdecimal type test").await? else {
+        return Ok(());
+    };
+
+    let row = sqlx_core::query::query(
+        "SELECT CAST('-12345678901234567890.012345678901234' AS DECIMAL(38,15)), CAST('-1234567890.1234' AS MONEY), CAST('-123456.1234' AS SMALLMONEY)",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+
+    assert_eq!(
+        BigDecimal::from_str("-12345678901234567890.012345678901234")?,
+        row.try_get::<BigDecimal, _>(0)?
+    );
+    assert_eq!(
+        BigDecimal::from_str("-1234567890.1234")?,
+        row.try_get::<BigDecimal, _>(1)?
+    );
+    assert_eq!(
+        BigDecimal::from_str("-123456.1234")?,
+        row.try_get::<BigDecimal, _>(2)?
+    );
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[cfg(all(feature = "integration-tests", feature = "chrono"))]
+#[tokio::test]
+async fn fetches_chrono_date_time_types_when_configured() -> Result<(), Box<dyn std::error::Error>>
+{
+    use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
+
+    let Some(mut conn) = native_test_conn("SQL Server chrono type test").await? else {
+        return Ok(());
+    };
+
+    let row = sqlx_core::query::query(
+        "SELECT CAST('1901-05-08 23:58:59' AS DATETIME), CAST('2016-10-23 12:45:37.1234567' AS DATETIME2), CAST('1789-07-14' AS DATE), CAST('23:59:59.9999' AS TIME), CAST('2016-10-23 12:45:37.1234567 +02:00' AS DATETIMEOFFSET(7))",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+
+    assert_eq!(
+        NaiveDate::from_ymd_opt(1901, 5, 8)
+            .unwrap()
+            .and_hms_opt(23, 58, 59)
+            .unwrap(),
+        row.try_get::<NaiveDateTime, _>(0)?
+    );
+    assert_eq!(
+        NaiveDate::from_ymd_opt(2016, 10, 23)
+            .unwrap()
+            .and_hms_nano_opt(12, 45, 37, 123_456_700)
+            .unwrap(),
+        row.try_get::<NaiveDateTime, _>(1)?
+    );
+    assert_eq!(
+        NaiveDate::from_ymd_opt(1789, 7, 14).unwrap(),
+        row.try_get::<NaiveDate, _>(2)?
+    );
+    assert_eq!(
+        NaiveTime::from_hms_nano_opt(23, 59, 59, 999_900_000).unwrap(),
+        row.try_get::<NaiveTime, _>(3)?
+    );
+    assert_eq!(
+        FixedOffset::east_opt(2 * 60 * 60)
+            .unwrap()
+            .from_local_datetime(
+                &NaiveDate::from_ymd_opt(2016, 10, 23)
+                    .unwrap()
+                    .and_hms_nano_opt(12, 45, 37, 123_456_700)
+                    .unwrap(),
+            )
+            .unwrap(),
+        row.try_get::<DateTime<FixedOffset>, _>(4)?
+    );
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[cfg(all(feature = "integration-tests", feature = "time"))]
+#[tokio::test]
+async fn fetches_time_crate_date_time_types_when_configured(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
+
+    let Some(mut conn) = native_test_conn("SQL Server time crate type test").await? else {
+        return Ok(());
+    };
+
+    let row = sqlx_core::query::query(
+        "SELECT CAST('2016-10-23 12:45:37.1234567' AS DATETIME2), CAST('1789-07-14' AS DATE), CAST('23:59:59.9999' AS TIME), CAST('2016-10-23 12:45:37.1234567 +02:00' AS DATETIMEOFFSET(7))",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+
+    let date = Date::from_calendar_date(2016, Month::October, 23)?;
+    let time = Time::from_hms_nano(12, 45, 37, 123_456_700)?;
+    assert_eq!(
+        PrimitiveDateTime::new(date, time),
+        row.try_get::<PrimitiveDateTime, _>(0)?
+    );
+    assert_eq!(
+        Date::from_calendar_date(1789, Month::July, 14)?,
+        row.try_get::<Date, _>(1)?
+    );
+    assert_eq!(
+        Time::from_hms_nano(23, 59, 59, 999_900_000)?,
+        row.try_get::<Time, _>(2)?
+    );
+    assert_eq!(
+        PrimitiveDateTime::new(date, time).assume_offset(UtcOffset::from_hms(2, 0, 0)?),
+        row.try_get::<OffsetDateTime, _>(3)?
+    );
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[cfg(all(feature = "integration-tests", feature = "json"))]
+#[tokio::test]
+async fn fetches_json_value_from_varchar_when_configured() -> Result<(), Box<dyn std::error::Error>>
+{
+    use sqlx_core::types::Json;
+
+    let Some(mut conn) = native_test_conn("SQL Server JSON type test").await? else {
+        return Ok(());
+    };
+
+    let value = sqlx_core::query_scalar::query_scalar::<_, Json<serde_json::Value>>("SELECT '123'")
+        .fetch_one(&mut conn)
+        .await?;
+
+    assert_eq!(Json(serde_json::Value::Number(123.into())), value);
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[cfg(all(feature = "integration-tests", feature = "uuid"))]
+#[tokio::test]
+async fn fetches_uniqueidentifier_uuid_when_configured() -> Result<(), Box<dyn std::error::Error>> {
+    use uuid::Uuid;
+
+    let Some(mut conn) = native_test_conn("SQL Server UUID type test").await? else {
+        return Ok(());
+    };
+
+    let row = sqlx_core::query::query(
+        "SELECT CAST('00000000-0000-0000-0000-000000000000' AS UNIQUEIDENTIFIER), CAST('6F9619FF-8B86-D011-B42D-00C04FC964FF' AS UNIQUEIDENTIFIER)",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+
+    assert_eq!(Uuid::nil(), row.try_get::<Uuid, _>(0)?);
+    assert_eq!(
+        Uuid::parse_str("6F9619FF-8B86-D011-B42D-00C04FC964FF")?,
+        row.try_get::<Uuid, _>(1)?
+    );
+
+    conn.close().await?;
+    Ok(())
+}
+
+#[cfg(feature = "integration-tests")]
+#[tokio::test]
 async fn fetches_bound_null_when_configured() -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut conn) = native_test_conn("SQL Server bound null test").await? else {
         return Ok(());

@@ -255,7 +255,16 @@ impl<'a> TryFrom<&'a MssqlTypeInfo> for AnyTypeInfo {
             MssqlType::Float => AnyTypeInfoKind::Double,
             MssqlType::NVarChar | MssqlType::VarChar => AnyTypeInfoKind::Text,
             MssqlType::VarBinary => AnyTypeInfoKind::Blob,
-            MssqlType::TinyInt | MssqlType::Other(_) => {
+            MssqlType::TinyInt
+            | MssqlType::Decimal
+            | MssqlType::Money
+            | MssqlType::Date
+            | MssqlType::Time
+            | MssqlType::DateTime
+            | MssqlType::DateTime2
+            | MssqlType::DateTimeOffset
+            | MssqlType::UniqueIdentifier
+            | MssqlType::Other(_) => {
                 return Err(Error::AnyDriverError(
                     format!("Any driver does not support the SQL Server type {type_info:?}").into(),
                 ));

@@ -29,6 +29,22 @@ pub enum MssqlType {
     VarChar,
     /// Binary data such as `varbinary`.
     VarBinary,
+    /// SQL Server `decimal`/`numeric`.
+    Decimal,
+    /// SQL Server `money`/`smallmoney`.
+    Money,
+    /// SQL Server `date`.
+    Date,
+    /// SQL Server `time`.
+    Time,
+    /// SQL Server legacy `datetime`/`smalldatetime`.
+    DateTime,
+    /// SQL Server `datetime2`.
+    DateTime2,
+    /// SQL Server `datetimeoffset`.
+    DateTimeOffset,
+    /// SQL Server `uniqueidentifier`.
+    UniqueIdentifier,
     /// A type not yet mapped by this skeleton.
     Other(String),
 }
@@ -62,6 +78,18 @@ impl MssqlTypeInfo {
         }
     }
 
+    pub(crate) const fn with_protocol(
+        kind: MssqlType,
+        protocol_type_info: protocol::TypeInfo,
+    ) -> Self {
+        Self {
+            kind,
+            variable_length: true,
+            size: Some(protocol_type_info.size as u16),
+            protocol_type_info: Some(protocol_type_info),
+        }
+    }
+
     /// Returns the known SQL Server type family.
     pub fn kind(&self) -> &MssqlType {
         &self.kind
@@ -73,6 +101,20 @@ impl MssqlTypeInfo {
 
     pub(crate) const fn protocol_type_info(&self) -> Option<&protocol::TypeInfo> {
         self.protocol_type_info.as_ref()
+    }
+
+    pub(crate) const fn scale(&self) -> u8 {
+        match &self.protocol_type_info {
+            Some(protocol_type_info) => protocol_type_info.scale,
+            None => 0,
+        }
+    }
+
+    pub(crate) const fn precision(&self) -> u8 {
+        match &self.protocol_type_info {
+            Some(protocol_type_info) => protocol_type_info.precision,
+            None => 0,
+        }
     }
 
     /// SQL `NULL` type information.
@@ -97,6 +139,87 @@ impl MssqlTypeInfo {
     pub const VARCHAR: Self = Self::new(MssqlType::VarChar);
     /// SQL Server binary type information.
     pub const VARBINARY: Self = Self::new(MssqlType::VarBinary);
+    /// SQL Server decimal/numeric type information.
+    pub const DECIMAL: Self = Self::with_protocol(
+        MssqlType::Decimal,
+        protocol::TypeInfo {
+            ty: protocol::DataType::NumericN,
+            size: 17,
+            scale: 0,
+            precision: 38,
+            collation: None,
+        },
+    );
+    /// SQL Server money type information.
+    pub const MONEY: Self = Self::new(MssqlType::Money);
+    /// SQL Server date type information.
+    pub const DATE: Self = Self::with_protocol(
+        MssqlType::Date,
+        protocol::TypeInfo {
+            ty: protocol::DataType::DateN,
+            size: 3,
+            scale: 0,
+            precision: 10,
+            collation: None,
+        },
+    );
+    /// SQL Server time type information.
+    pub const TIME: Self = Self::with_protocol(
+        MssqlType::Time,
+        protocol::TypeInfo {
+            ty: protocol::DataType::TimeN,
+            size: 5,
+            scale: 7,
+            precision: 0,
+            collation: None,
+        },
+    );
+    /// SQL Server datetime2 type information.
+    pub const DATETIME2: Self = Self::with_protocol(
+        MssqlType::DateTime2,
+        protocol::TypeInfo {
+            ty: protocol::DataType::DateTime2N,
+            size: 8,
+            scale: 7,
+            precision: 0,
+            collation: None,
+        },
+    );
+    /// SQL Server datetimeoffset type information.
+    pub const DATETIMEOFFSET: Self = Self::with_protocol(
+        MssqlType::DateTimeOffset,
+        protocol::TypeInfo {
+            ty: protocol::DataType::DateTimeOffsetN,
+            size: 10,
+            scale: 7,
+            precision: 34,
+            collation: None,
+        },
+    );
+    /// SQL Server uniqueidentifier type information.
+    pub const UNIQUEIDENTIFIER: Self = Self::with_protocol(
+        MssqlType::UniqueIdentifier,
+        protocol::TypeInfo {
+            ty: protocol::DataType::Guid,
+            size: 16,
+            scale: 0,
+            precision: 0,
+            collation: None,
+        },
+    );
+
+    pub(crate) const fn decimal_with_scale(scale: u8) -> Self {
+        Self::with_protocol(
+            MssqlType::Decimal,
+            protocol::TypeInfo {
+                ty: protocol::DataType::NumericN,
+                size: 17,
+                scale,
+                precision: 38,
+                collation: None,
+            },
+        )
+    }
 
     pub(crate) fn from_protocol(type_info: &protocol::TypeInfo) -> Self {
         let kind = match type_info.ty {
@@ -129,6 +252,21 @@ impl MssqlTypeInfo {
             | protocol::DataType::Binary
             | protocol::DataType::BigVarBinary
             | protocol::DataType::BigBinary => MssqlType::VarBinary,
+            protocol::DataType::Decimal
+            | protocol::DataType::DecimalN
+            | protocol::DataType::Numeric
+            | protocol::DataType::NumericN => MssqlType::Decimal,
+            protocol::DataType::Money
+            | protocol::DataType::MoneyN
+            | protocol::DataType::SmallMoney => MssqlType::Money,
+            protocol::DataType::DateN => MssqlType::Date,
+            protocol::DataType::TimeN => MssqlType::Time,
+            protocol::DataType::DateTime
+            | protocol::DataType::DateTimeN
+            | protocol::DataType::SmallDateTime => MssqlType::DateTime,
+            protocol::DataType::DateTime2N => MssqlType::DateTime2,
+            protocol::DataType::DateTimeOffsetN => MssqlType::DateTimeOffset,
+            protocol::DataType::Guid => MssqlType::UniqueIdentifier,
             _ => MssqlType::Other(type_info.name().to_owned()),
         };
 
@@ -159,6 +297,14 @@ impl TypeInfo for MssqlTypeInfo {
             MssqlType::NVarChar => "NVARCHAR",
             MssqlType::VarChar => "VARCHAR",
             MssqlType::VarBinary => "VARBINARY",
+            MssqlType::Decimal => "DECIMAL",
+            MssqlType::Money => "MONEY",
+            MssqlType::Date => "DATE",
+            MssqlType::Time => "TIME",
+            MssqlType::DateTime => "DATETIME",
+            MssqlType::DateTime2 => "DATETIME2",
+            MssqlType::DateTimeOffset => "DATETIMEOFFSET",
+            MssqlType::UniqueIdentifier => "UNIQUEIDENTIFIER",
             MssqlType::Other(name) => name,
         }
     }
