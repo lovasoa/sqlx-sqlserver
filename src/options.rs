@@ -404,9 +404,8 @@ mod tests {
 
     #[test]
     fn parses_unescaped_password_with_at_sign() {
-        let opts =
-            MssqlConnectOptions::parse_url("mssql://username:p@ssw0rd@example.com/database")
-                .unwrap();
+        let opts = MssqlConnectOptions::parse_url("mssql://username:p@ssw0rd@example.com/database")
+            .unwrap();
 
         assert_eq!("username", opts.username());
         assert_eq!(Some("p@ssw0rd"), opts.password());
