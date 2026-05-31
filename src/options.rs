@@ -393,6 +393,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_unescaped_username_with_at_sign() {
+        let opts =
+            MssqlConnectOptions::parse_url("mssql://user@hostname:password@example.com/database")
+                .unwrap();
+
+        assert_eq!("user@hostname", opts.username());
+        assert_eq!(Some("password"), opts.password());
+    }
+
+    #[test]
+    fn parses_unescaped_password_with_at_sign() {
+        let opts =
+            MssqlConnectOptions::parse_url("mssql://username:p@ssw0rd@example.com/database")
+                .unwrap();
+
+        assert_eq!("username", opts.username());
+        assert_eq!(Some("p@ssw0rd"), opts.password());
+    }
+
+    #[test]
     fn parses_named_instance_without_resolving_port() {
         let opts = MssqlConnectOptions::parse_url(
             "mssql://sa:secret@example.com/master?instance=SQLEXPRESS",

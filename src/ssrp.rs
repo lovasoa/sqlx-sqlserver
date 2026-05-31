@@ -103,6 +103,23 @@ mod tests {
     }
 
     #[test]
+    fn finds_tcp_port_among_multiple_instances() {
+        let body = "\
+            ServerName;SRV;InstanceName;FIRST;tcp;1433;;\
+            ServerName;SRV;InstanceName;SECOND;tcp;1434;;\
+        ";
+
+        assert_eq!(1434, find_instance_tcp_port(body, "SECOND").unwrap());
+    }
+
+    #[test]
+    fn finds_instance_case_insensitively() {
+        let body = "ServerName;SRV;InstanceName;SqLeXpReSs;tcp;1435;;";
+
+        assert_eq!(1435, find_instance_tcp_port(body, "sqlexpress").unwrap());
+    }
+
+    #[test]
     fn rejects_ssrp_response_without_matching_instance() {
         let body = b"ServerName;SRV;InstanceName;OTHER;tcp;1435;;";
         let mut response = vec![SVR_RESP];
@@ -110,5 +127,34 @@ mod tests {
         response.extend_from_slice(body);
 
         assert!(parse_ssrp_response(&response, "SQLEXPRESS").is_err());
+    }
+
+    #[test]
+    fn rejects_instance_without_tcp_port() {
+        let body = "ServerName;SRV;InstanceName;SQLEXPRESS;np;\\\\server\\pipe;;";
+        let error = find_instance_tcp_port(body, "SQLEXPRESS").unwrap_err();
+
+        assert!(error.to_string().contains("no TCP port"));
+    }
+
+    #[test]
+    fn rejects_too_short_response() {
+        let error = parse_ssrp_response(&[SVR_RESP, 0], "SQLEXPRESS").unwrap_err();
+
+        assert!(error.to_string().contains("too short"));
+    }
+
+    #[test]
+    fn rejects_invalid_response_type() {
+        let error = parse_ssrp_response(&[0x04, 0, 0], "SQLEXPRESS").unwrap_err();
+
+        assert!(error.to_string().contains("invalid SSRP response type"));
+    }
+
+    #[test]
+    fn rejects_response_size_mismatch() {
+        let error = parse_ssrp_response(&[SVR_RESP, 10, 0, b'a'], "SQLEXPRESS").unwrap_err();
+
+        assert!(error.to_string().contains("size mismatch"));
     }
 }
